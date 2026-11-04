@@ -1,0 +1,66 @@
+diff --git a/src/backend/sandbox.rs b/src/backend/sandbox.rs
+--- a/src/backend/sandbox.rs
++++ b/src/backend/sandbox.rs
+@@ -37,6 +37,10 @@
+     "--ro-bind",
+     "/etc",
+     "/etc",
++    // Nix: /usr links into the store.
++    "--ro-bind",
++    "/nix/store",
++    "/nix/store",
+     "--symlink",
+     "usr/lib",
+     "/lib",
+diff --git a/crates/flea-gui/src/g2/pv3/sandbox.rs b/crates/flea-gui/src/g2/pv3/sandbox.rs
+--- a/crates/flea-gui/src/g2/pv3/sandbox.rs
++++ b/crates/flea-gui/src/g2/pv3/sandbox.rs
+@@ -64,6 +64,9 @@
+         "--ro-bind",
+         "/etc",
+         "/etc",
++        "--ro-bind",
++        "/nix/store",
++        "/nix/store",
+         // fontconfig finds its cache instead of logging an error per font dir; -try skips a box without one.
+         "--ro-bind-try",
+         "/var/cache/fontconfig",
+diff --git a/src/backend/thumbbind.rs b/src/backend/thumbbind.rs
+--- a/src/backend/thumbbind.rs
++++ b/src/backend/thumbbind.rs
+@@ -4,9 +4,9 @@
+ use std::path::{Component, Path, PathBuf};
+ 
+ // The jail mounts /usr and /etc and links these four names into usr, so a program under any of them is in reach already.
+-const JAIL_ROOTS: [&str; 6] = ["/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64"];
++const JAIL_ROOTS: [&str; 7] = ["/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/nix/store"];
+ // Only these two are real mounts, so a link that leaves them has to bind its own target.
+-const MOUNTED: [&str; 2] = ["/usr", "/etc"];
++const MOUNTED: [&str; 3] = ["/usr", "/etc", "/nix/store"];
+ // The jail mounts these itself, and a bind must never shadow them.
+ const KERNEL: [&str; 3] = ["/proc", "/dev", "/sys"];
+ const ANY_EXECUTE_BIT: u32 = 0o111;
+diff --git a/src/backend/officepdf.rs b/src/backend/officepdf.rs
+--- a/src/backend/officepdf.rs
++++ b/src/backend/officepdf.rs
+@@ -55,7 +55,7 @@
+ fn find_program(name: &str, path: &str) -> Option<String> {
+     let runs = |candidate: &Path| {
+         std::fs::canonicalize(candidate).is_ok_and(|real| {
+-            real.starts_with("/usr") && std::fs::metadata(&real).is_ok_and(|m| m.is_file() && m.permissions().mode() & ANY_EXECUTE_BIT != 0)
++            (real.starts_with("/usr") || real.starts_with("/nix/store")) && std::fs::metadata(&real).is_ok_and(|m| m.is_file() && m.permissions().mode() & ANY_EXECUTE_BIT != 0)
+         })
+     };
+     path.split(':').filter(|d| !d.is_empty()).map(|d| Path::new(d).join(name)).find(|c| runs(c)).map(|c| c.to_string_lossy().into_owned())
+diff --git a/src/backend/codereq.rs b/src/backend/codereq.rs
+--- a/src/backend/codereq.rs
++++ b/src/backend/codereq.rs
+@@ -201,7 +201,7 @@
+ // The first bat on the path, only when the jail can see it: the jail binds /usr, so the file the link resolves to must lie under it.
+ // Sample input: "/usr/local/bin:/usr/bin" with /usr/bin/bat gives Some("/usr/bin/bat"); a bat under /home, or a link from /usr into it, gives None.
+ fn bat_in(path: &str) -> Option<String> {
+-    bat_under(path, Path::new("/usr"))
++    bat_under(path, Path::new("/usr")).or_else(|| bat_under(path, Path::new("/nix/store")))
+ }
+ 
+ fn bat_under(path: &str, root: &Path) -> Option<String> {
