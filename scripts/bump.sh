@@ -41,7 +41,7 @@ package_fields() {
 fields=$(package_fields "$package") || exit 2
 current=${fields%%$'\n'*}
 if [[ -n $pretend_current ]]; then
-  [[ $pretend_current =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid current version: $pretend_current" >&2; exit 2; }
+  [[ $pretend_current =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "invalid current version: $pretend_current" >&2; exit 2; }
   current=$pretend_current
 fi
 
@@ -52,7 +52,8 @@ if [[ $(jq -r '.isDraft or .isPrerelease' <<< "$release") == true ]]; then
   exit 0
 fi
 tag=$(jq -r '.tagName' <<< "$release")
-[[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid release tag: $tag" >&2; exit 3; }
+# No leading zeros: sort -V would order v0.4.00 after 0.4.0 although they are the same version.
+[[ $tag =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "invalid release tag: $tag" >&2; exit 3; }
 new=${tag#v}
 if [[ $new == "$current" || $(printf '%s\n%s\n' "$current" "$new" | sort -V | tail -1) != "$new" ]]; then
   echo "up to date ($current)" >&2
@@ -61,16 +62,23 @@ if [[ $new == "$current" || $(printf '%s\n%s\n' "$current" "$new" | sort -V | ta
 fi
 
 asset="flea-$tag-linux-x86_64.tar.gz"
-checksum=$(gh release download "$tag" -R thisisgm/flea -p "$asset.sha256" -O -)
-hex=${checksum%%[[:space:]]*}
+# Read at most 4 KiB: the checksum asset is upstream-controlled.
+checksum=$(gh release download "$tag" -R thisisgm/flea -p "$asset.sha256" -O - | head -c 4096)
+read -r hex _ <<< "$checksum" || true
+hex=${hex,,}
 [[ $hex =~ ^[0-9a-f]{64}$ ]] || { echo 'invalid published sha256' >&2; exit 4; }
 published=$(nix hash convert --hash-algo sha256 --to sri "$hex")
 url="https://github.com/thisisgm/flea/releases/download/$tag/$asset"
-actual=$(nix hash convert --hash-algo sha256 --to sri "$(nix-prefetch-url --type sha256 "$url")")
+nix32=$(nix-prefetch-url --type sha256 "$url") || { echo "download failed: $url" >&2; exit 5; }
+actual=$(nix hash convert --hash-algo sha256 --to sri "$nix32")
 [[ $published == "$actual" ]] || { printf 'checksum mismatch: published=%s actual=%s\n' "$published" "$actual" >&2; exit 5; }
 
 if $dry_run; then
   printf 'version = "%s";\nhash = "%s";\n' "$new" "$published" >&2
+  # A dry run changes nothing, so it never tells a workflow to proceed.
+  [[ -z $output ]] || printf 'updated=false\n' >> "$output"
+  printf 'old=%s new=%s hash=%s (dry run)\n' "$current" "$new" "$published" >&2
+  exit 0
 else
   tmp=$(mktemp "$package.XXXXXX")
   trap 'rm -f "$tmp"' EXIT

@@ -5,29 +5,27 @@ on:
     - cron: "47 5 * * 1"
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-  actions: write
+permissions: {}
 
 concurrency:
   group: lock
   cancel-in-progress: false
 
 jobs:
-  lock:
+  # Updates and tests flake.lock with a read-only token; hands the tested lock to propose.
+  prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      BRANCH: chore/flake-lock
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.lock.outputs.changed }}
+      lock: ${{ steps.lock.outputs.lock }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
+          persist-credentials: false
       - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
         with:
           extra_nix_config: experimental-features = nix-command flakes
@@ -35,13 +33,13 @@ jobs:
       - id: lock
         name: nix flake update
         run: |
-          nix flake metadata --json > "$RUNNER_TEMP/before.json"
           nix flake update
           if git diff --quiet flake.lock; then
             echo "flake.lock unchanged" >&2
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "lock=$(base64 -w0 flake.lock)" >> "$GITHUB_OUTPUT"
           fi
 
       - if: steps.lock.outputs.changed == 'true'
@@ -50,43 +48,103 @@ jobs:
           nix build .#flea -L
           nix flake check -L
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fhs=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.flea.fhs)
-          "$fhs/bin/flea-fhs" sh -c "! ldd /usr/bin/flea /usr/bin/flea-gui | grep 'not found'"
-          "$fhs/bin/flea-fhs" sh -c 'bwrap --ro-bind /usr /usr --ro-bind /etc /etc --symlink usr/lib /lib --ro-bind-try /lib64 /lib64 --proc /proc --dev /dev --unshare-all -- /usr/bin/flea --version'
+          scripts/smoke.sh
 
-      - if: steps.lock.outputs.changed == 'true'
-        name: open or update the PR
+  propose:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      LOCK: ${{ needs.prepare.outputs.lock }}
+      BRANCH: chore/flake-lock
+      BOT: 41898282+github-actions[bot]@users.noreply.github.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: push the branch and open the PR
         run: |
-          nix flake metadata --json > "$RUNNER_TEMP/after.json"
+          cp flake.lock "$RUNNER_TEMP/before.lock"
+          base64 -d <<< "$LOCK" > flake.lock
+          jq -e .nodes flake.lock >/dev/null
           {
-            echo "Weekly nixpkgs refresh. Inputs, before → after:"
+            echo "Weekly nixpkgs refresh, tested in the prepare job. Inputs, before → after:"
             echo
-            jq -rn --slurpfile b "$RUNNER_TEMP/before.json" --slurpfile a "$RUNNER_TEMP/after.json" '
-              $a[0].locks.nodes | to_entries[] | select(.value.locked.rev?) |
-              "- `\(.key)`: \($b[0].locks.nodes[.key].locked.rev[0:12] // "new") → \(.value.locked.rev[0:12])"'
+            jq -rn --slurpfile b "$RUNNER_TEMP/before.lock" --slurpfile a flake.lock '
+              $a[0].nodes | to_entries[] | select(.value.locked.rev?) |
+              "- \(.key): \(($b[0].nodes[.key].locked.rev // "new")[0:12]) → \(.value.locked.rev[0:12])"'
           } > "$RUNNER_TEMP/body.md"
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "$BOT"
           git switch -C "$BRANCH"
           git commit -am "flake.lock: update nixpkgs"
-          git push -f origin HEAD
-          if gh pr view "$BRANCH" -R "$REPO" >/dev/null 2>&1; then
-            gh pr edit "$BRANCH" -R "$REPO" --body-file "$RUNNER_TEMP/body.md"
+          gh auth setup-git
+          push=true
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            git fetch -q origin "$BRANCH"
+            if git log --format=%ae origin/main..FETCH_HEAD | grep -qvxF "$BOT"; then
+              echo "::notice::$BRANCH has commits not made by the bot; leaving it as it is"
+              push=false
+            elif git diff --quiet FETCH_HEAD HEAD; then
+              push=false
+            fi
+          fi
+          if $push; then git push -f origin HEAD; fi
+          pr=$(gh pr list -R "$REPO" --head "$BRANCH" --state open --json number -q '.[0].number // empty')
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" -R "$REPO" --body-file "$RUNNER_TEMP/body.md"
           else
             gh pr create -R "$REPO" --base main --head "$BRANCH" --title "flake.lock: update nixpkgs" --body-file "$RUNNER_TEMP/body.md"
           fi
+
+      - name: run the required check and wait for it
+        run: |
+          sha=$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)
           gh workflow run check.yml -R "$REPO" --ref "$BRANCH"
+          id=
+          for _ in $(seq 20); do
+            sleep 15
+            id=$(gh run list -R "$REPO" -w check.yml -b "$BRANCH" -e workflow_dispatch --json databaseId,headSha \
+              -q "[.[] | select(.headSha == \"$sha\")][0].databaseId // empty")
+            [ -n "$id" ] && break
+          done
+          [ -n "$id" ] || { echo "dispatched check run not found" >&2; exit 1; }
+          gh run watch "$id" -R "$REPO" --exit-status
 
       - name: close the failure issue
         run: |
           n=$(gh issue list -R "$REPO" -l lock-failed -s open --json number -q '.[0].number // empty')
-          if [ -n "$n" ]; then gh issue close "$n" -R "$REPO" -c "Recovered in $RUN_URL"; fi
+          if [ -n "$n" ]; then gh issue close "$n" -R "$REPO" -c "Recovered: the lock refresh passed its check."; fi
 
-      - if: failure()
-        name: report the failure
+  report:
+    needs: [prepare, propose]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RESULTS: "prepare=${{ needs.prepare.result }} propose=${{ needs.propose.result }}"
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: open or update the failure issue
         run: |
+          gh label create lock-failed -R "$REPO" -c B60205 -d "The flake.lock refresh failed" 2>/dev/null || true
+          msg="lock refresh failed ($RESULTS): $RUN_URL"
           n=$(gh issue list -R "$REPO" -l lock-failed -s open --json number -q '.[0].number // empty')
-          msg="lock refresh failed: $RUN_URL"
           if [ -n "$n" ]; then
             gh issue comment "$n" -R "$REPO" -b "$msg"
           else

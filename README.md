@@ -30,7 +30,7 @@ CI proves build, `nix flake check`, the smoke step (libraries, version, a jailed
 
 A daily bot (`bump.yml`) looks for a new upstream release and opens a PR. The PR body lists upstream changes to the files the packaging relies on. "Inspection incomplete" means GitHub's compare was truncated or had no patch for some files, so read those yourself. You review and merge. A weekly PR (`lock.yml`) refreshes `nixpkgs`. Nothing merges by itself. `nixarchy` follows `main`.
 
-If a bot PR shows no check, close and reopen it (as you), or push to it.
+The bot waits for the PR's `check` and opens a `bump-failed`/`lock-failed` issue if it is red. If a bot PR still shows no check, close and reopen it (as you). You can push fixes to a bot branch: the bot then leaves that branch alone instead of overwriting it.
 
 Manual liveness check:
 

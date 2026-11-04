@@ -46,6 +46,39 @@ the two differ:
 - **D8 (step 4) pretend dispatch.** A `pretend_current` dispatch on `main` stops before
   the PR step (`inputs.pretend_current == ''`). The tree is unchanged, so a commit would
   fail and file a false `bump-failed` issue.
+- **D9 (step 4) Token split (security; Opus 3, Codex 1).** Each of bump and lock is split
+  into jobs:
+  - `prepare` runs upstream's binary (build, flake check, smoke) with `contents: read`
+    only and no persisted git credentials.
+  - `propose` never runs upstream code. It holds the write token: bump redoes the two-line
+    rewrite and checks it equals prepare's tested `new`/`hash`; lock writes prepare's
+    tested `flake.lock`, passed as an output. Then it pushes, opens the PR and dispatches
+    the check.
+  - `recover` and `report` hold `issues: write` only.
+- **D10 (step 4) Bot branches (Opus 1, Codex 3).** If a bot branch has commits not made by
+  the bot, the bot leaves it alone. If its tree is unchanged, it does not push, so the SHA
+  and the check result are kept. Only open PRs are looked up (Opus 2). A new bump closes
+  older open bump PRs as superseded.
+- **D11 (step 4) Recovery only on proof (Codex 2, Opus 4).** `propose` waits for the
+  dispatched `check` run (`gh run watch --exit-status`). It closes the failure issue only
+  if that run passes; a red check fails the job and so files the issue. An up-to-date run
+  closes it through `recover`. A `pretend_current` run never closes or opens anything.
+- **D12 (steps 3–4) One smoke script (Opus 6, Codex 4).** `scripts/smoke.sh` is shared by
+  all three workflows: no missing libraries, version equality outside and inside a jail,
+  `bat` a real file, and `bwrap` being the shim.
+- **D13 (step 4) Failure issues (Opus 7).** The body names each job's result. The label is
+  created if missing, so the first failure is still reported.
+- **D14 (steps 1–2) Script hardening (agy, Opus 5).**
+  - Tags and versions need no leading zeros.
+  - The checksum asset is read through `head -c 4096`, leading whitespace is skipped and
+    the hex lowercased.
+  - A failed download is a clear exit 5.
+  - `--dry-run` writes `updated=false`.
+  - In `upstream-diff.sh`, upstream text has backticks and `<>` replaced and lines cut at
+    200 characters. Watched files also match on `previous_filename` (renames), and their
+    lines are listed first. Going over 50 lines counts as "inspection incomplete". The
+    body is capped at 60000 bytes.
+- **D15 (step 3) Format quoting (Codex 6).** `git ls-files -z | xargs -0`.
 - **D7 (steps 7–8) Merge order and the bot-PR test.** `check.yml` cannot run on #1's PR,
   because #2 brings it. #2's branch contains all of #1, so `check.yml` on **#2's PR** is
   the run that builds #1's flake (this replaces the spec's "on the #1 PR"). The merge-box

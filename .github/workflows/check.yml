@@ -33,19 +33,10 @@ jobs:
         run: |
           # Ubuntu 24.04 runners block the unprivileged user namespaces that bwrap needs.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fhs=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.flea.fhs)
-          run() { "$fhs/bin/flea-fhs" sh -c "$1"; }
-          run "! ldd /usr/bin/flea /usr/bin/flea-gui | grep 'not found'"
-          want=$(nix eval --raw .#flea-bin.version)
-          got=$(run '/usr/bin/flea --version')
-          test "$got" = "$want" || { echo "version: got '$got', want '$want'" >&2; exit 1; }
-          run 'test -f /usr/bin/bat -a ! -L /usr/bin/bat'
-          test "$(run 'command -v bwrap')" = /usr/bin/bwrap
-          run 'grep -q -- "--ro-bind /nix/store /nix/store" /usr/bin/bwrap'
-          run 'bwrap --ro-bind /usr /usr --ro-bind /etc /etc --symlink usr/lib /lib --ro-bind-try /lib64 /lib64 --proc /proc --dev /dev --unshare-all -- /usr/bin/flea --version'
+          scripts/smoke.sh
 
       - name: format
-        run: nix run .#formatter.x86_64-linux -- --check $(git ls-files '*.nix')
+        run: git ls-files -z '*.nix' | xargs -0 nix run .#formatter.x86_64-linux -- --check
 
   # Not a required check: it reports a stopped bump schedule on the next PR or push.
   schedule-health:
