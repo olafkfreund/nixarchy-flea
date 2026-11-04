@@ -142,6 +142,10 @@ Repo traps that apply throughout:
    `7zz`, hence the link. `profile` runs for every entry, including D-Bus helpers, so it
    must never fail: hence `|| true`.
 
+   **Deviation (steps 4–5):** `base` is `pkgs.flea` only if it carries `optionalPackages`
+   (i.e. it is ours). Otherwise it is `pkgs.callPackage ./package.nix { }`, so that a future,
+   different nixpkgs `flea` cannot silently replace it.
+
 4. **`nix/nixos-module.nix`**: `{ config, lib, pkgs, ... }:` with
    `let base = pkgs.flea or (pkgs.callPackage ./package.nix { });`. This honours the consumer's
    nixpkgs and overlay, as the spec's `pkgs.flea` does, and works without the overlay too.
@@ -167,8 +171,10 @@ Repo traps that apply throughout:
      `package`. The default is `if osEnabled then osConfig.programs.flea.package else base.override {…}`,
      where `osEnabled = osConfig != null && (osConfig.programs.flea.enable or false)`.
    - Everything under `config = mkIf cfg.enable { … }`.
-   - Assertion: when `osEnabled`, none of the HM dependency options is set (test with
-     `options.programs.flea.<x>.isDefined`, so an explicit default is caught too).
+   - Assertion: when `osEnabled`, none of the HM dependency options is set.
+     **Deviation:** `isDefined` is also true for an option left at its default, so the
+     test is `isDefined && highestPrio < 1500` (a user definition, including an explicit
+     default value).
      Message: "programs.flea: set htmlPreview/optionalDependencies/extraPackages in the NixOS module; Home Manager uses its package".
    - `defaultFileManager.enable`: `xdg.mimeApps.enable = true`;
      `xdg.mimeApps.defaultApplications."inode/directory" = "com.thisisgm.flea.desktop"`;
@@ -220,6 +226,14 @@ Repo traps that apply throughout:
        its assertion, checked via `builtins.tryEval` on the assertion list.
    → verify: `nix flake check -L` passes (I run it).
    Traps: `home-manager` input only for checks, `follows = "nixpkgs"`.
+
+   **Deviations (step 6):** (1) "every option on" excludes `dropbox`, because
+   `dropbox-cli` pulls in the unfree `dropbox`, which nixpkgs refuses to evaluate without
+   `allowUnfree`. The README says so. (2) The FileManager1 `Exec=` pattern goes through
+   `builtins.unsafeDiscardStringContext`, because `lib.hasInfix` rejects a pattern string
+   that refers to a store path. It is only compared as text. (3) `hm-under-nixos` tests the
+   bad case through the NixOS `config.assertions` list, where Home Manager's assertions
+   land, not through `builtins.tryEval`.
 
 7. **Build and check** (me): `nix fmt`, `nix build .#flea -L`, `nix flake check -L`. Fix by
    sending failures back to the step's coder. Commit.
