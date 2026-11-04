@@ -1,6 +1,6 @@
 ---
 status: approved
-issue: 0  # placeholder until a tracking issue exists (open question 1)
+issue: 1
 author: olafkfreund
 ---
 

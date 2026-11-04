@@ -1,6 +1,6 @@
 ---
 status: approved
-issue: 0
+issue: 1
 spec: spec/2026-11-04-0-flea-nix-package.md
 coders:
   1: codex   # two small Rust patches where one wrong line breaks the jail silently: small tricky logic

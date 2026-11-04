@@ -1,6 +1,6 @@
 ---
 status: approved
-issue: 0
+issue: 1
 intent: intent/2026-11-04-0-flea-nix-package.md
 ---
 
