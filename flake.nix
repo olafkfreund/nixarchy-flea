@@ -7,6 +7,6 @@
       pkgs = nixpkgs.legacyPackages.x86_64-linux;
     in
     {
-      packages.x86_64-linux.flea-unwrapped = pkgs.callPackage ./nix/package.nix { };
+      packages.x86_64-linux.flea-bin = pkgs.callPackage ./nix/package.nix { };
     };
 }

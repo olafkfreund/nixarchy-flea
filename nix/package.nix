@@ -1,103 +1,85 @@
 {
   lib,
-  stdenv,
-  rustPlatform,
-  fetchFromGitHub,
-  pkg-config,
-  fontconfig,
-  freetype,
-  glib,
-  gdk-pixbuf,
-  libheif,
-  libxcb,
-  libxkbcommon,
-  wayland,
-  vulkan-loader,
-  libGL,
-  poppler,
-  mpv-unwrapped,
+  stdenvNoCC,
+  fetchurl,
 }:
 
 let
-  flea-unwrapped = rustPlatform.buildRustPackage rec {
-    pname = "flea";
+  flea-bin = stdenvNoCC.mkDerivation rec {
+    pname = "flea-bin";
     version = "0.4.0";
 
-    src = fetchFromGitHub {
-      owner = "thisisgm";
-      repo = "flea";
-      tag = "v${version}";
-      hash = "sha256-zzGFgcpA2D3AwGKjt8H1cz9mwi/i/iqBNB4xLl35bZg=";
+    src = fetchurl {
+      url = "https://github.com/thisisgm/flea/releases/download/v${version}/flea-v${version}-linux-x86_64.tar.gz";
+      hash = "sha256-76RmxJFiKMrW43T58zshbvI29TUVdY/dxQLGly9cUNc=";
     };
 
-    cargoLock = {
-      lockFile = "${src}/Cargo.lock";
-      outputHashes."gpui-pre-0.3.9" = "sha256-dG429jiK+hmafEIHSQRuL58tzS6XvbqCoTxIJuEe0MI=";
-    };
+    dontConfigure = true;
+    dontBuild = true;
+    # Upstream's binaries run unmodified inside the FHS env.
+    dontPatchELF = true;
+    dontStrip = true;
+    # Helper shebangs (/usr/bin/python3, /usr/bin/expect) resolve inside the FHS env.
+    dontPatchShebangs = true;
+    # The four ui/{,boot/}{Commons,Ui} links point into /usr/share/omarchy and dangle here.
+    dontCheckForBrokenSymlinks = true;
 
-    patches = [
-      ./shelf-mode.patch
-      ./nix-store-jail.patch
-    ];
-
-    cargoBuildFlags = [
-      "--workspace"
-      "--bins"
-    ];
-    doCheck = false;
-
-    nativeBuildInputs = [ pkg-config ];
-    buildInputs = [
-      fontconfig
-      freetype
-      glib
-      gdk-pixbuf
-      libheif
-      libxcb
-      libxkbcommon
-      wayland
-      vulkan-loader
-      libGL
-      poppler
-      mpv-unwrapped
-    ];
-
+    # Mirrors upstream packaging/flea-bin/PKGBUILD package(), with $out as /usr; the pacman hook is skipped.
     installPhase = ''
       runHook preInstall
-      mkdir -p target/release
-      cp target/${stdenv.hostPlatform.rust.cargoShortTarget}/release/{flea,flea-gui} target/release/
-      make DESTDIR=$out VERSION=${version}-1 install
-      mv $out/usr/* $out/ && rmdir $out/usr
-      rm -r $out/share/libalpm
+
+      install -Dm755 flea "$out/bin/flea"
+      install -Dm755 flea-gui "$out/bin/flea-gui"
+      install -Dm755 tools/flea-gio-auth "$out/lib/flea/flea-gio-auth"
+      install -Dm755 tools/flea-udisks "$out/lib/flea/flea-udisks"
+      install -Dm755 tools/flea-portal "$out/lib/flea/flea-portal"
+      install -Dm644 packaging/flea.portal -t "$out/share/xdg-desktop-portal/portals"
+      install -Dm644 packaging/org.freedesktop.impl.portal.desktop.flea.service -t "$out/share/dbus-1/services"
+      install -Dm755 tools/flea-filemanager1 "$out/lib/flea/flea-filemanager1"
+      install -Dm644 packaging/com.thisisgm.flea.FileManager1.service -t "$out/share/dbus-1/services"
+      install -Dm755 tools/flea-mpris "$out/lib/flea/flea-mpris"
+      install -Dm644 packaging/com.thisisgm.flea.desktop -t "$out/share/applications"
+      install -Dm644 packaging/com.thisisgm.flea.svg -t "$out/share/icons/hicolor/scalable/apps"
+      install -Dm644 LICENSE THIRD-PARTY-LICENSES.txt -t "$out/share/licenses/flea"
+
+      install -Dm644 ui/qmldir ui/*.qml ui/*.js -t "$out/share/flea/ui"
+      install -Dm644 ui/js/*.js ui/js/*.mjs -t "$out/share/flea/ui/js"
+      install -Dm644 ui/vendor/*.mjs -t "$out/share/flea/ui/vendor"
+      install -Dm644 ui/vendor/LICENSES/* -t "$out/share/flea/ui/vendor/LICENSES"
+      install -Dm644 ui/boot/shell.qml ui/boot/picker.qml ui/boot/fleatab.qml ui/boot/tabtearoff.qml -t "$out/share/flea/ui/boot"
+      install -Dm644 shelf/manifest.json shelf/README.md shelf/*.qml shelf/*.js -t "$out/share/flea/shelf"
+      for catalog in i18n/*/flea.json; do install -Dm644 "$catalog" "$out/share/flea/$catalog"; done
+
+      sed -i "s/^  \"version\": \"[^\"]*\",\$/  \"version\": \"${version}-1\",/" "$out/share/flea/shelf/manifest.json"
+      grep -qF "  \"version\": \"${version}-1\"," "$out/share/flea/shelf/manifest.json" \
+        || { echo "flea-bin: shelf/manifest.json does not carry the version ${version}-1" >&2; exit 1; }
+
+      ln -s /usr/share/omarchy/shell/Commons "$out/share/flea/ui/Commons"
+      ln -s /usr/share/omarchy/shell/Ui "$out/share/flea/ui/Ui"
+      ln -s /usr/share/omarchy/shell/Commons "$out/share/flea/ui/boot/Commons"
+      ln -s /usr/share/omarchy/shell/Ui "$out/share/flea/ui/boot/Ui"
+
       runHook postInstall
     '';
 
-    postFixup = ''
-      for b in $out/bin/flea $out/bin/flea-gui; do
-        patchelf --add-rpath ${
-          lib.makeLibraryPath [
-            vulkan-loader
-            wayland
-            libGL
-            poppler
-            mpv-unwrapped
-          ]
-        } $b
-      done
-    '';
-
-    # Helper shebangs (/usr/bin/python3, /usr/bin/expect) resolve inside the FHS env.
-    dontPatchShebangs = true;
-    # The four ui/{,boot/}{Commons,Ui} links are meant to dangle.
-    dontCheckForBrokenSymlinks = true;
-
     meta = {
-      description = "File manager for Omarchy";
+      description = "File manager for Omarchy (upstream release binaries)";
       homepage = "https://github.com/thisisgm/flea";
-      license = lib.licenses.mit;
+      license = with lib.licenses; [
+        asl20
+        bsd2
+        bsd3
+        cc0
+        isc
+        mit
+        mpl20
+        unicode-30
+        zlib
+      ];
+      sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
       mainProgram = "flea";
       platforms = [ "x86_64-linux" ];
     };
   };
 in
-flea-unwrapped
+flea-bin
