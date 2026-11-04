@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 1
 spec: spec/2026-11-04-0-flea-nix-package.md
 coders:
