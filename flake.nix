@@ -5,8 +5,13 @@
     { nixpkgs, ... }:
     let
       pkgs = nixpkgs.legacyPackages.x86_64-linux;
+      flea = pkgs.callPackage ./nix/package.nix { };
     in
     {
-      packages.x86_64-linux.flea-bin = pkgs.callPackage ./nix/package.nix { };
+      packages.x86_64-linux = {
+        inherit flea;
+        flea-bin = flea.unwrapped;
+        default = flea;
+      };
     };
 }

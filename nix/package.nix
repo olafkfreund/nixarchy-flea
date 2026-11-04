@@ -2,9 +2,82 @@
   lib,
   stdenvNoCC,
   fetchurl,
+  runCommand,
+  writeShellScript,
+  writeShellScriptBin,
+  buildFHSEnv,
+  runtimeShell,
+  bubblewrap,
+  glibc,
+  python3,
+  gobject-introspection,
+  glib,
+  expect,
+  bat,
+  util-linux,
+  gvfs,
+  jq,
+  quickjs-ng,
+  ripgrep,
+  shared-mime-info,
+  udisks,
+  usbmuxd,
+  wl-clipboard,
+  xdg-terminal-exec,
+  xdg-utils,
+  poppler,
+  poppler-utils,
+  mpv-unwrapped,
+  vulkan-loader,
+  libGL,
+  wayland,
+  diffutils,
+  git,
+  quickshell,
+  fontconfig,
+  freetype,
+  gdk-pixbuf,
+  libheif,
+  libxcb,
+  libxkbcommon,
+  hicolor-icon-theme,
+  qt6,
+  _7zz,
+  libarchive,
+  ffmpeg,
+  ffmpegthumbnailer,
+  imagemagick,
+  libreoffice,
+  tailscale,
+  zoxide,
+  dropbox-cli,
+  withHtmlPreview ? true,
+  extraPackages ? [ ],
+  omarchyPath ? "/run/current-system/sw/share/omarchy",
 }:
 
 let
+  omarchyLink =
+    runCommand "flea-omarchy-link" { }
+      "mkdir -p $out/share; ln -s ${omarchyPath} $out/share/omarchy";
+  bwrapShim = writeShellScriptBin "bwrap" ''
+    exec ${bubblewrap}/bin/bwrap --ro-bind /nix/store /nix/store --ro-bind ${glibc}/etc ${glibc}/etc "$@"
+  '';
+  sevenzip7z = runCommand "7z-link" { } "mkdir -p $out/bin; ln -s ${_7zz}/bin/7zz $out/bin/7z";
+  optionalPackages = {
+    sevenzip = sevenzip7z;
+    inherit
+      libarchive
+      ffmpeg
+      ffmpegthumbnailer
+      imagemagick
+      libreoffice
+      tailscale
+      zoxide
+      ;
+    dropbox = dropbox-cli;
+  };
+
   flea-bin = stdenvNoCC.mkDerivation rec {
     pname = "flea-bin";
     version = "0.4.0";
@@ -81,5 +154,105 @@ let
       platforms = [ "x86_64-linux" ];
     };
   };
+
+  flea-fhs = buildFHSEnv {
+    name = "flea-fhs";
+    runScript = writeShellScript "flea-fhs-exec" ''exec "$@"'';
+    dieWithParent = false;
+    profile = ''
+      export GI_TYPELIB_PATH=/usr/lib/girepository-1.0 GIO_EXTRA_MODULES=/usr/lib/gio/modules
+      chmod -R u+w "''${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/io.github.thisisgm.flea-shelf" 2>/dev/null || true
+    '';
+    extraBuildCommands = ''
+      test -d "$out/usr/bin" -a ! -L "$out/usr/bin" || { echo "flea-fhs: usr/bin is not a real directory" >&2; exit 1; }
+      tools="bat soffice libreoffice"
+      for f in "$out"/usr/share/thumbnailers/*.thumbnailer; do
+        [ -e "$f" ] || continue
+        tools="$tools $(sed -n 's/^\(Try\)\?Exec=\([^ ]*\).*/\2/p' "$f" | xargs -r -n1 basename)"
+      done
+      for t in $(printf '%s\n' $tools | sort -u); do
+        p="$out/usr/bin/$t"
+        [ -L "$p" ] || continue
+        real=$(readlink -f "$p"); rm "$p"; cp "$real" "$p"
+        echo "flea-fhs: real file $t"
+      done
+    '';
+    targetPkgs =
+      p:
+      [
+        flea-bin
+        bwrapShim
+        omarchyLink
+        (python3.withPackages (ps: [ ps.pygobject3 ]))
+        gobject-introspection
+        glib
+        expect
+        bat
+        util-linux
+        gvfs
+        jq
+        quickjs-ng
+        ripgrep
+        shared-mime-info
+        udisks
+        usbmuxd
+        wl-clipboard
+        xdg-terminal-exec
+        xdg-utils
+        poppler
+        poppler-utils
+        mpv-unwrapped
+        vulkan-loader
+        libGL
+        wayland
+        diffutils
+        git
+        quickshell
+        fontconfig
+        freetype
+        gdk-pixbuf
+        libheif
+        libxcb
+        libxkbcommon
+        hicolor-icon-theme
+      ]
+      ++ lib.optionals withHtmlPreview [
+        qt6.qtdeclarative
+        qt6.qtwebengine
+      ]
+      ++ extraPackages;
+  };
+
+  flea =
+    runCommand "flea-${flea-bin.version}"
+      {
+        passthru = {
+          unwrapped = flea-bin;
+          fhs = flea-fhs;
+          inherit optionalPackages;
+        };
+        meta = flea-bin.meta // {
+          description = "File manager for Omarchy (FHS runtime)";
+        };
+      }
+      ''
+        mkdir -p "$out/bin" "$out/share/xdg-desktop-portal/portals" "$out/share/dbus-1/services"
+        cat > "$out/bin/flea" <<'EOF'
+        #!${runtimeShell}
+        exec ${flea-fhs}/bin/flea-fhs /usr/bin/flea "$@"
+        EOF
+        cat > "$out/bin/flea-gui" <<'EOF'
+        #!${runtimeShell}
+        exec ${flea-fhs}/bin/flea-fhs /usr/bin/flea-gui "$@"
+        EOF
+        chmod +x "$out/bin/flea" "$out/bin/flea-gui"
+        ln -s ${flea-bin}/share/applications "$out/share/applications"
+        ln -s ${flea-bin}/share/icons "$out/share/icons"
+        ln -s ${flea-bin}/share/licenses "$out/share/licenses"
+        cp ${flea-bin}/share/xdg-desktop-portal/portals/flea.portal "$out/share/xdg-desktop-portal/portals/"
+        for service in ${flea-bin}/share/dbus-1/services/*.service; do
+          sed 's|^Exec=/usr/lib/flea/|Exec=${flea-fhs}/bin/flea-fhs /usr/lib/flea/|' "$service" > "$out/share/dbus-1/services/''${service##*/}"
+        done
+      '';
 in
-flea-bin
+flea
