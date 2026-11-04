@@ -1,0 +1,183 @@
+name: bump
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      pretend_current:
+        description: "Pretend the packaged version is this X.Y.Z (self-check; opens no PR)"
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: bump
+  cancel-in-progress: false
+
+jobs:
+  # Runs upstream's new binary (build, flake check, smoke) with a read-only token only.
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      updated: ${{ steps.bump.outputs.updated }}
+      old: ${{ steps.bump.outputs.old }}
+      new: ${{ steps.bump.outputs.new }}
+      hash: ${{ steps.bump.outputs.hash }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+
+      - id: bump
+        name: bump.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRETEND: ${{ inputs.pretend_current }}
+        run: |
+          args=(--output "$GITHUB_OUTPUT")
+          if [ -n "${PRETEND:-}" ]; then args+=(--pretend-current "$PRETEND"); fi
+          scripts/bump.sh "${args[@]}"
+
+      - if: steps.bump.outputs.updated == 'true'
+        name: build, check, smoke
+        run: |
+          nix build .#flea -L
+          nix flake check -L
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          scripts/smoke.sh
+
+  # Never runs upstream's binary: redoes the two-line rewrite, then pushes and opens the PR.
+  propose:
+    needs: prepare
+    if: needs.prepare.outputs.updated == 'true' && inputs.pretend_current == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      OLD: ${{ needs.prepare.outputs.old }}
+      NEW: ${{ needs.prepare.outputs.new }}
+      HASH: ${{ needs.prepare.outputs.hash }}
+      BOT: 41898282+github-actions[bot]@users.noreply.github.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+
+      - name: rewrite (must match what prepare tested)
+        run: |
+          scripts/bump.sh --output "$RUNNER_TEMP/out"
+          grep -qx "new=$NEW" "$RUNNER_TEMP/out" && grep -qx "hash=$HASH" "$RUNNER_TEMP/out" \
+            || { echo "release changed since prepare ran" >&2; cat "$RUNNER_TEMP/out" >&2; exit 1; }
+
+      - name: push the branch and open the PR
+        run: |
+          branch="bump/flea-v$NEW"
+          scripts/upstream-diff.sh "v$OLD" "v$NEW" > "$RUNNER_TEMP/body.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "$BOT"
+          git switch -C "$branch"
+          git commit -am "flea: $OLD -> $NEW"
+          gh auth setup-git
+          push=true
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch -q origin "$branch"
+            if git log --format=%ae origin/main..FETCH_HEAD | grep -qvxF "$BOT"; then
+              echo "::notice::$branch has commits not made by the bot; leaving it as it is"
+              push=false
+            elif git diff --quiet FETCH_HEAD HEAD; then
+              push=false
+            fi
+          fi
+          if $push; then git push -f origin HEAD; fi
+          pr=$(gh pr list -R "$REPO" --head "$branch" --state open --json number -q '.[0].number // empty')
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" -R "$REPO" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create -R "$REPO" --base main --head "$branch" --title "flea: $OLD -> $NEW" --body-file "$RUNNER_TEMP/body.md"
+          fi
+          # Older bump PRs are superseded by this one.
+          gh pr list -R "$REPO" --state open --json number,headRefName \
+            -q ".[] | select(.headRefName | startswith(\"bump/flea-v\")) | select(.headRefName != \"$branch\") | .number" |
+            while read -r old; do gh pr close "$old" -R "$REPO" -c "Superseded by the bump to $NEW."; done
+          echo "BRANCH=$branch" >> "$GITHUB_ENV"
+
+      - name: run the required check and wait for it
+        run: |
+          sha=$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)
+          # workflow_dispatch is one of the events a GITHUB_TOKEN may start, so no approval is needed.
+          gh workflow run check.yml -R "$REPO" --ref "$BRANCH"
+          id=
+          for _ in $(seq 20); do
+            sleep 15
+            id=$(gh run list -R "$REPO" -w check.yml -b "$BRANCH" -e workflow_dispatch --json databaseId,headSha \
+              -q "[.[] | select(.headSha == \"$sha\")][0].databaseId // empty")
+            [ -n "$id" ] && break
+          done
+          [ -n "$id" ] || { echo "dispatched check run not found" >&2; exit 1; }
+          gh run watch "$id" -R "$REPO" --exit-status
+
+      - name: close the failure issue
+        run: |
+          n=$(gh issue list -R "$REPO" -l bump-failed -s open --json number -q '.[0].number // empty')
+          if [ -n "$n" ]; then gh issue close "$n" -R "$REPO" -c "Recovered: the bump to $NEW passed its check."; fi
+
+  # An up-to-date run also means a past failure no longer applies (main caught up, or the release was withdrawn).
+  recover:
+    needs: prepare
+    if: needs.prepare.outputs.updated == 'false' && inputs.pretend_current == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: close the failure issue
+        run: |
+          n=$(gh issue list -R "$REPO" -l bump-failed -s open --json number -q '.[0].number // empty')
+          if [ -n "$n" ]; then gh issue close "$n" -R "$REPO" -c "Recovered: up to date."; fi
+
+  report:
+    needs: [prepare, propose, recover]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RESULTS: "prepare=${{ needs.prepare.result }} propose=${{ needs.propose.result }} recover=${{ needs.recover.result }}"
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: open or update the failure issue
+        run: |
+          gh label create bump-failed -R "$REPO" -c B60205 -d "The Flea bump bot failed" 2>/dev/null || true
+          msg="bump failed ($RESULTS): $RUN_URL"
+          n=$(gh issue list -R "$REPO" -l bump-failed -s open --json number -q '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" -R "$REPO" -b "$msg"
+          else
+            gh issue create -R "$REPO" -l bump-failed -t "Flea bump failed" -b "$msg"
+          fi

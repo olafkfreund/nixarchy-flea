@@ -1,0 +1,58 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+
+      - name: build
+        run: nix build .#flea -L
+
+      - name: flake check
+        run: nix flake check -L
+
+      - name: smoke (prebuilt binary inside the FHS env and an inner jail)
+        run: |
+          # Ubuntu 24.04 runners block the unprivileged user namespaces that bwrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          scripts/smoke.sh
+
+      - name: format
+        run: git ls-files -z '*.nix' | xargs -0 nix run .#formatter.x86_64-linux -- --check
+
+  # Not a required check: it reports a stopped bump schedule on the next PR or push.
+  schedule-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: bump.yml is active and succeeded within 3 days
+        run: |
+          state=$(gh api "repos/$REPO/actions/workflows/bump.yml" -q .state)
+          test "$state" = active || { echo "bump.yml state: $state" >&2; exit 1; }
+          last=$(gh run list -R "$REPO" -w bump.yml -s success -L 1 --json createdAt -q '.[0].createdAt // empty')
+          test -n "$last" || { echo "bump.yml has never succeeded" >&2; exit 1; }
+          age=$(( $(date +%s) - $(date -d "$last" +%s) ))
+          test "$age" -lt $((3 * 86400)) || { echo "last successful bump run: $last" >&2; exit 1; }
