@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 2
 spec: spec/2026-11-04-2-ci-build-update.md
 coders:
