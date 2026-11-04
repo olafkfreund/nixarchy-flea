@@ -1,38 +1,45 @@
 ---
 status: approved
-issue: 0
+issue: 1
 spec: spec/2026-11-04-0-flea-nix-package.md
 coders:
-  1: codex   # two small Rust patches where one wrong line breaks the jail silently: small tricky logic
-  2: coder   # derivation boilerplate; iterates with my build output
-  3: coder   # FHS env + wrapper, same file as step 2, keeps the coder's cache warm
+  1: coder   # unpack derivation: mechanical, mirrors upstream's flea-bin package()
+  3: codex   # bwrap shim, thumbnailer-derived copy list, profile chmod: small tricky logic
   4: coder   # NixOS module, short
   5: codex   # HM module: osConfig defaulting, assertions, conditional file generation
   6: coder   # flake.nix outputs and checks wire the files above together
   8: agy     # README: mechanical prose from the module options
 reviewers:
-  - codex    # reviews steps 2-4 and 6 (Nix plumbing), which it did not write
-  - agy      # reviews steps 1 and 5 (patches, HM logic), which codex wrote
+  - codex    # reviews steps 1, 4 and 6, which it did not write
+  - agy      # reviews steps 3 and 5, which codex wrote
 ---
 
 # Plan: Nix package, flake and Home Manager module for Flea
 
-## Approved decisions (from spec, self-contained)
+> **Revision 2** follows spec revision 2 (prebuilt release binaries). Steps 1–3 are
+> rewritten and step 2 is dropped. Steps 4–10 are unchanged except where marked. The rev. 1
+> work (two patches, source build) is in git history up to `33d96d9`, and step 1 below
+> deletes it from the tree.
 
-- Upstream: `thisisgm/flea` tag `v0.4.0` (rev `3745419ecb4f2fee4db0ce18da483be9c7204978`),
-  fetched with `fetchFromGitHub` in `nix/package.nix`. Not a flake input.
+## Approved decisions (from spec rev. 2, self-contained)
+
+- Upstream: `thisisgm/flea` release `v0.4.0`, asset `flea-v0.4.0-linux-x86_64.tar.gz`, fetched
+  with `fetchurl`. Hash `sha256-76RmxJFiKMrW43T58zshbvI29TUVdY/dxQLGly9cUNc=` (from upstream's
+  `.sha256`: `efa466c4…50d7`, verified locally). Not a flake input.
 - The only flake input is `nixpkgs` (`github:NixOS/nixpkgs/nixos-unstable`), plus
   `home-manager` used by `checks` only (`inputs.nixpkgs.follows`). System: `x86_64-linux` only.
-- Two derivations:
-  - `flea-unwrapped`: `buildRustPackage`, `--workspace --bins`, `doCheck = false`, installed
-    with upstream's `make install`, then `usr/*` is moved up.
+- Two derivations. Flea itself is not compiled (buildFHSEnv's own small init and rootfs
+  builder do build once, cold):
+  - `flea-bin`: an unpacked release laid out like upstream's `packaging/flea-bin/PKGBUILD`
+    `package()`, with `$out` as `/usr`. Binaries untouched.
   - `flea`: a `buildFHSEnv` runtime (`flea-fhs`) plus a thin output with `bin/`,
     `share/applications`, icons, `flea.portal`, and D-Bus `.service` files whose
     `Exec=` goes through `flea-fhs`.
-- Two source patches: `nix/shelf-mode.patch` and `nix/nix-store-jail.patch`.
+- No source patches. Their four fixes move into packaging: a `bwrap` shim, real-file
+  copies of trust-checked tools in the FHS `usr/bin`, and a shelf `chmod` in the FHS profile.
 - NixOS module: registration and system services. HM module: per-user preferences.
   Dependency options live in both, and HM defers to `osConfig` when the NixOS module is on.
-- Build-time tests are off. Replacement checks are `nix flake check` layout/eval checks
+- No build-time tests (Flea is not compiled). Checks are `nix flake check` layout/eval checks
   plus host runtime checks.
 - Defaults: optional deps off, HTML preview on. The shelf is owned by Flea. Hyprland binds
   go in `~/.config/hypr/flea-binds.lua`, loaded by a hand-added `pcall(require, "hypr.flea-binds")`.
@@ -44,7 +51,10 @@ only), `dropbox-cli`, `xdg-terminal-exec`, `quickshell`, `libheif`, `poppler` (=
 `wayland`, `libxkbcommon`, `libxcb`, `gdk-pixbuf`, `udisks`, `usbmuxd`, `gvfs`,
 `wl-clipboard`, `bat`, `jq`, `ripgrep`, `shared-mime-info`, `expect`, `bubblewrap`,
 `util-linux`, `qt6.qtwebengine`, `qt6.qtdeclarative`, `gobject-introspection`,
-`python3Packages.pygobject3`, `xdg-utils`, `diffutils`, `git`, `nixfmt`. rustc 1.99 (≥ 1.77).
+`python3Packages.pygobject3`, `xdg-utils`, `diffutils`, `git`, `nixfmt`, `hicolor-icon-theme`,
+`glibc` (2.44; the binaries need ≥ 2.39). Release binaries: interpreter
+`/lib64/ld-linux-x86-64.so.2`, NEEDED gdk-pixbuf, gobject/glib, libxcb, fontconfig,
+libxkbcommon(-x11), libgcc_s, libm, libc, no RUNPATH.
 
 Repo traps that apply throughout:
 - Untracked files are invisible to flakes: `git add` every new file before `nix build`.
@@ -53,75 +63,109 @@ Repo traps that apply throughout:
 
 ## Steps
 
-1. **`nix/shelf-mode.patch`, `nix/nix-store-jail.patch`** (new files, unified diffs against
-   v0.4.0 with `a/` `b/` prefixes)
-   - shelf-mode: in `src/shelfplugin.rs` `install()`, after each `std::fs::copy(&from, &to)`
-     succeeds, call `std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o644))`
-     with the same `map_err` style. Import `std::os::unix::fs::PermissionsExt` if it is
-     not already in scope.
-   - nix-store-jail:
-     - `src/backend/sandbox.rs` `BWRAP_FLAGS`: insert `"--ro-bind", "/nix/store", "/nix/store",`
-       right after the `/etc` bind, with a one-line comment (`// Nix: /usr links into the store.`).
-     - `crates/flea-gui/src/g2/pv3/sandbox.rs` (~line 64): same three words after the `/etc` bind.
-     - `src/backend/thumbbind.rs:7,9`: `JAIL_ROOTS: [&str; 7]` gets `"/nix/store"`,
-       `MOUNTED: [&str; 3]` gets `"/nix/store"`.
-     - `src/backend/officepdf.rs:58`: `(real.starts_with("/usr") || real.starts_with("/nix/store"))`.
-     - `src/backend/codereq.rs:204` `bat_in`:
-       `bat_under(path, Path::new("/usr")).or_else(|| bat_under(path, Path::new("/nix/store")))`.
-       `bat_under` takes `&Path`. It looks only at the first `bat` on PATH, which is fine:
-       inside the FHS env `/usr/bin` comes first.
-   → verify: in a scratch clone of v0.4.0,
-     `git apply --check /mnt/code/Source-home/GitHub/nixarchy-flea/nix/*.patch`, then apply and
-     run `nix shell nixpkgs#cargo nixpkgs#rustc -c cargo check -p flea` (the `flea` crate has
-     only pure-Rust deps). The patched `flea-gui` file compiles in step 2's build.
-   Traps: no other line may change. Run `rg 'BWRAP_FLAGS.len\(\)|READONLY_'` to confirm
-   that no production code depends on the list length (tests may, but tests are off).
+1. **`nix/package.nix`: replace `flea-unwrapped` with `flea-bin`**, and delete
+   `nix/shelf-mode.patch` and `nix/nix-store-jail.patch` (`git rm`).
+   - `flea-bin = stdenvNoCC.mkDerivation rec { pname = "flea-bin"; version = "0.4.0"; src = fetchurl { url = "https://github.com/thisisgm/flea/releases/download/v${version}/flea-v${version}-linux-x86_64.tar.gz"; hash = "sha256-76RmxJFiKMrW43T58zshbvI29TUVdY/dxQLGly9cUNc="; }; … }`.
+     The tarball unpacks to `flea-${version}-linux-x86_64/`, which stdenv's `sourceRoot`
+     detection handles.
+   - `dontConfigure = true; dontBuild = true; dontPatchELF = true; dontStrip = true; dontPatchShebangs = true; dontCheckForBrokenSymlinks = true;`
+   - `installPhase` = upstream `packaging/flea-bin/PKGBUILD` `package()` line for line,
+     with `$pkgdir/usr` → `$out` and `$pkgname` → `flea`. That gives bin, 5 helpers in
+     `lib/flea`, portal, 2 D-Bus services, desktop, icon, licenses, ui (+js, vendor,
+     LICENSES, boot), shelf, and i18n catalogs (`i18n/*/flea.json` only). Then the `sed`
+     version stamp to `${version}-1` with its `grep -qF` guard, and the four `ln -s`
+     Commons/Ui links. **Skip** the `flea.hook` install.
+   - `meta = { description = "File manager for Omarchy (upstream release binaries)"; homepage = "https://github.com/thisisgm/flea"; license = with lib.licenses; [ asl20 bsd2 bsd3 cc0 isc mit mpl20 unicode-30 zlib ]; sourceProvenance = [ lib.sourceTypes.binaryNativeCode ]; mainProgram = "flea"; platforms = [ "x86_64-linux" ]; };`
+     If `unicode-30` is not the attribute name in the pinned nixpkgs, use the closest
+     Unicode license attr and note it.
+   - Until step 3, the file returns `flea-bin`. `flake.nix` exposes
+     `packages.x86_64-linux.flea-bin` in place of `flea-unwrapped`.
+   → verify (I run it): `nix build .#flea-bin -L` (no compile, seconds);
+     `ls result/bin result/lib/flea` shows 2 + 5 files; `result/share/flea/ui/boot/shell.qml`
+     exists; `grep '"version": "0.4.0-1"' result/share/flea/shelf/manifest.json`;
+     `cmp result/bin/flea-gui <tarball>/flea-gui` (byte-identical); `head -1 result/lib/flea/flea-portal`
+     is `#!/usr/bin/python3`; no `share/libalpm`.
+   Traps: `install -Dm644 … -t dir` needs the target dirs, which `-D` creates. Globs such
+   as `ui/*.qml` must match, or `install` fails loudly, which is what we want.
 
-2. **`nix/package.nix`, part 1: `flea-unwrapped`**. Also add a minimal `flake.nix` exposing
-   `packages.x86_64-linux.flea-unwrapped` so it can be built.
-   - `pname = "flea"; version = "0.4.0";` with `src = fetchFromGitHub { owner = "thisisgm"; repo = "flea"; tag = "v${version}"; hash = lib.fakeHash; }`.
-     Replace the hash with the one from the first build.
-   - `cargoLock = { lockFile = "${src}/Cargo.lock"; outputHashes."gpui-pre-0.3.9" = lib.fakeHash; };`
-   - `cargoBuildFlags = [ "--workspace" "--bins" ]; doCheck = false;`
-   - `nativeBuildInputs = [ pkg-config ];`
-     `buildInputs = [ fontconfig freetype glib gdk-pixbuf libheif libxcb libxkbcommon wayland vulkan-loader libGL poppler mpv-unwrapped ];`
-     Add whatever the build demands, and note each addition in this file (deviation rule).
-   - `patches = [ ./shelf-mode.patch ./nix-store-jail.patch ];`
-   - `installPhase`: `runHook preInstall`; `mkdir -p target/release`;
-     `cp $releaseDir/flea $releaseDir/flea-gui target/release/`;
-     `make DESTDIR=$out VERSION=${version}-1 install`;
-     `mv $out/usr/* $out/ && rmdir $out/usr`; `rm -r $out/share/libalpm`; `runHook postInstall`.
-   - `postFixup`: `for b in $out/bin/flea $out/bin/flea-gui; do patchelf --add-rpath ${lib.makeLibraryPath [ vulkan-loader wayland libGL poppler mpv-unwrapped ]} $b; done`.
-   - `dontPatchShebangs = true;` The helpers' `#!/usr/bin/python3` and `#!/usr/bin/expect`
-     must stay: they resolve to the FHS env's python (with pygobject) and expect.
-   - `dontCheckForBrokenSymlinks = true;` The four `ui/{,boot/}{Commons,Ui}` links are meant to dangle.
-   - `meta = { description; homepage; license = lib.licenses.mit; mainProgram = "flea"; platforms = [ "x86_64-linux" ]; };`
-   → verify: `nix build .#flea-unwrapped -L` succeeds (I run it); `patchelf --print-rpath`
-     on both binaries lists the vulkan-loader and mpv-unwrapped paths; `head -1 result/lib/flea/flea-portal`
-     is still `#!/usr/bin/python3`; then
-     `ls result/share/flea/ui/boot/shell.qml result/lib/flea/` shows the 5 helpers, and
-     `grep '"version": "0.4.0-1"' result/share/flea/shelf/manifest.json` matches.
-   Traps: `$releaseDir` is set by `cargoBuildHook`. The `build.rs` linker probe may print
-   a warning, which is fine. The Makefile `sed -i` writes into `$out`, so it is writable.
+2. **Dropped in rev. 2** (the source build). Numbering is kept so steps 4–10 stay as approved.
 
 3. **`nix/package.nix`, part 2: `flea-fhs` and `flea`**. The file becomes a function
-   returning `flea` with `passthru = { unwrapped; fhs; }`. `flea-unwrapped` is exposed via
-   `passthru.unwrapped`.
+   returning `flea` with `passthru = { unwrapped = flea-bin; fhs = flea-fhs; optionalPackages; }`.
    - Arguments (besides the callPackage'd nixpkgs ones): `withHtmlPreview ? true`, `extraPackages ? [ ]`,
      `omarchyPath ? "/run/current-system/sw/share/omarchy"`.
    - `omarchyLink = runCommand "flea-omarchy-link" { } "mkdir -p $out/share; ln -s ${omarchyPath} $out/share/omarchy";`
-   - `flea-fhs = buildFHSEnv { name = "flea-fhs"; runScript = writeShellScript "flea-fhs-exec" ''exec "$@"''; dieWithParent = false; profile = "export GI_TYPELIB_PATH=/usr/lib/girepository-1.0 GIO_EXTRA_MODULES=/usr/lib/gio/modules"; targetPkgs = p: [ flea-unwrapped omarchyLink (python3.withPackages (ps: [ ps.pygobject3 ])) gobject-introspection glib expect bat bubblewrap util-linux gvfs jq quickjs-ng ripgrep shared-mime-info udisks usbmuxd wl-clipboard xdg-terminal-exec xdg-utils poppler poppler-utils mpv-unwrapped vulkan-loader libGL wayland diffutils git quickshell fontconfig freetype gdk-pixbuf libheif libxcb libxkbcommon ] ++ lib.optionals withHtmlPreview [ qt6.qtdeclarative qt6.qtwebengine ] ++ extraPackages; };`
-   - `flea = runCommand "flea-${version}" { passthru…; meta = flea-unwrapped.meta; }` with:
+   - `bwrapShim = writeShellScriptBin "bwrap" ''exec ${bubblewrap}/bin/bwrap --ro-bind /nix/store /nix/store --ro-bind ${glibc}/etc ${glibc}/etc "$@"'';`
+     The real `bubblewrap` package is **not** in targetPkgs, so `/usr/bin/bwrap` is the shim.
+   - `flea-fhs = buildFHSEnv { name = "flea-fhs"; runScript = writeShellScript "flea-fhs-exec" ''exec "$@"''; dieWithParent = false; profile = …; extraBuildCommands = …; targetPkgs = p: [ flea-bin bwrapShim omarchyLink (python3.withPackages (ps: [ ps.pygobject3 ])) gobject-introspection glib expect bat util-linux gvfs jq quickjs-ng ripgrep shared-mime-info udisks usbmuxd wl-clipboard xdg-terminal-exec xdg-utils poppler poppler-utils mpv-unwrapped vulkan-loader libGL wayland diffutils git quickshell fontconfig freetype gdk-pixbuf libheif libxcb libxkbcommon hicolor-icon-theme ] ++ lib.optionals withHtmlPreview [ qt6.qtdeclarative qt6.qtwebengine ] ++ extraPackages; };`
+   - `profile`:
+     ```sh
+     export GI_TYPELIB_PATH=/usr/lib/girepository-1.0 GIO_EXTRA_MODULES=/usr/lib/gio/modules
+     chmod -R u+w "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/io.github.thisisgm.flea-shelf" 2>/dev/null || true
+     ```
+     In the Nix string, write `''${XDG_CONFIG_HOME:-$HOME/.config}` so Nix doesn't interpolate it.
+   - `extraBuildCommands` ($out is the FHS root):
+     ```sh
+     test -d "$out/usr/bin" -a ! -L "$out/usr/bin" || { echo "flea-fhs: usr/bin is not a real directory" >&2; exit 1; }
+     tools="bat soffice libreoffice"
+     for f in "$out"/usr/share/thumbnailers/*.thumbnailer; do
+       [ -e "$f" ] || continue
+       tools="$tools $(sed -n 's/^\(Try\)\?Exec=\([^ ]*\).*/\2/p' "$f" | xargs -r -n1 basename)"
+     done
+     for t in $(printf '%s
+' $tools | sort -u); do
+       p="$out/usr/bin/$t"
+       [ -L "$p" ] || continue
+       real=$(readlink -f "$p"); rm "$p"; cp "$real" "$p"
+       echo "flea-fhs: real file $t"
+     done
+     ```
+     Resolve before removing: the entry is a symlink into the read-only store, so `cp`
+     through it fails, and `cp --remove-destination` onto itself would delete its source.
+   - `flea = runCommand "flea-${flea-bin.version}" { passthru…; meta = flea-bin.meta // { description = …; }; }` with:
      - `bin/flea` and `bin/flea-gui`: `#!${runtimeShell}` + `exec ${flea-fhs}/bin/flea-fhs /usr/bin/flea "$@"` (and the same for `flea-gui`), then `chmod +x`
      - The desktop file is `Exec=flea --gui %f` (checked), so it works through PATH unchanged
-     - `ln -s` `share/applications`, `share/icons`, `share/licenses` from unwrapped
+     - `ln -s` `share/applications`, `share/icons`, `share/licenses` from flea-bin
      - `share/xdg-desktop-portal/portals/flea.portal` copied
      - `share/dbus-1/services/*.service` copied with `sed 's|^Exec=/usr/lib/flea/|Exec=${flea-fhs}/bin/flea-fhs /usr/lib/flea/|'`
-   - In the same file, `sevenzip7z = runCommand "7z-link" { } "mkdir -p $out/bin; ln -s ${_7zz}/bin/7zz $out/bin/7z";`, exposed as `passthru.optionalPackages` (an attrset used by the modules): `{ sevenzip = sevenzip7z; libarchive; ffmpeg; ffmpegthumbnailer; imagemagick; libreoffice; tailscale; zoxide; dropbox = dropbox-cli; }`.
-   → verify: `nix build .#flea`; `grep -h ^Exec= result/share/dbus-1/services/*` all start with
-     the flea-fhs store path; `nix run .#flea -- --version` prints `0.4.0`.
+   - In the same file, `sevenzip7z = runCommand "7z-link" { } "mkdir -p $out/bin; ln -s ${_7zz}/bin/7zz $out/bin/7z";`, exposed as `passthru.optionalPackages` (an attrset used by the modules): `{ sevenzip = sevenzip7z; libarchive; ffmpeg; ffmpegthumbnailer; imagemagick; libreoffice; tailscale; zoxide; dropbox = dropbox-cli; }`. `libreoffice` is the wrapped `pkgs.libreoffice`.
+   → verify (I run it): `nix build .#flea`; the build log shows `flea-fhs: real file bat`
+     and the thumbnailer copies (gdk-pixbuf, heif); `grep -h ^Exec= result/share/dbus-1/services/*`
+     all start with the flea-fhs store path; `nix run .#flea -- --version` prints `0.4.0`;
+     and inside the env, with `fhs=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.flea.fhs)`
+     and each check run as `$fhs/bin/flea-fhs sh -c '…'`: `test -f /usr/bin/bat -a ! -L /usr/bin/bat`,
+     `command -v bwrap` → `/usr/bin/bwrap`, `head -2 /usr/bin/bwrap` is the shim,
+     `! ldd /usr/bin/flea-gui | grep -q 'not found'` (exit 0 = nothing missing), and
+     `bwrap --ro-bind /usr /usr --ro-bind /etc /etc --symlink usr/lib /lib --ro-bind-try /lib64 /lib64 --proc /proc --dev /dev --unshare-all -- /usr/bin/flea --version` → `0.4.0`.
+     The last one proves a jailed prebuilt binary loads its libraries.
    Traps: `buildFHSEnv` takes `targetPkgs` as a function. Flea calls `/usr/bin/7z`, not
-   `7zz`, hence the link.
+   `7zz`, hence the link. `profile` runs for every entry, including D-Bus helpers, so it
+   must never fail: hence `|| true`.
+
+   **Deviations (step 3, from the step 10 reviews; each checked at runtime):**
+   - `.thumbnailer` files named absolute store paths, so the `/usr/bin` copies went
+     unused. `extraBuildCommands` now replaces them with copies whose `Exec=`/`TryExec=`
+     use `/usr/bin/<tool>`. Checked: `gdk-pixbuf-thumbnailer` made a 32×32 PNG in a
+     `--clearenv` jail.
+   - Flea's HTML jail runs `/usr/bin/qml6` (Arch's name), and nixpkgs ships `qml`. A
+     `qml6` wrapper (only with `withHtmlPreview`) sets `QML_IMPORT_PATH` and execs `qml`.
+     Checked: it imports QtWebEngine under the HTML jail's exact `--setenv` set.
+   - Inside buildFHSEnv, `/etc/*` link to `/.host-etc/*`, which Flea's jails did not bind,
+     so fonts and every host `/etc` file dangled. The shim adds
+     `--ro-bind-try /.host-etc /.host-etc` (parity with Arch, where jails see all of
+     `/etc`). Checked: `fc-match sans` works in a jail.
+   - `omarchyPath` is passed through `lib.escapeShellArg`.
+   **Deviations (step 5, reviews):** the assertion counts priority < 1000 as user-set
+   (`mkDefault` in a shared profile is not), also covers `package`, and names every
+   option. A `package` without `passthru.fhs` fails with a clear `throw`.
+   **Deviation (step 6, review):** the overlay's `flea-bin` is computed on its own, not
+   from `final.flea`, so a later overlay's `flea` cannot break it. A new check,
+   `fhs-rootfs`, asserts that the thumbnailer rewrite, the real files, `qml6` and the
+   QtWebEngine QML dir exist.
+
+   **Deviation (steps 4–5):** `base` is `pkgs.flea` only if it carries `optionalPackages`
+   (i.e. it is ours). Otherwise it is `pkgs.callPackage ./package.nix { }`, so that a future,
+   different nixpkgs `flea` cannot silently replace it.
 
 4. **`nix/nixos-module.nix`**: `{ config, lib, pkgs, ... }:` with
    `let base = pkgs.flea or (pkgs.callPackage ./package.nix { });`. This honours the consumer's
@@ -148,8 +192,10 @@ Repo traps that apply throughout:
      `package`. The default is `if osEnabled then osConfig.programs.flea.package else base.override {…}`,
      where `osEnabled = osConfig != null && (osConfig.programs.flea.enable or false)`.
    - Everything under `config = mkIf cfg.enable { … }`.
-   - Assertion: when `osEnabled`, none of the HM dependency options is set (test with
-     `options.programs.flea.<x>.isDefined`, so an explicit default is caught too).
+   - Assertion: when `osEnabled`, none of the HM dependency options is set.
+     **Deviation:** `isDefined` is also true for an option left at its default, so the
+     test is `isDefined && highestPrio < 1500` (a user definition, including an explicit
+     default value).
      Message: "programs.flea: set htmlPreview/optionalDependencies/extraPackages in the NixOS module; Home Manager uses its package".
    - `defaultFileManager.enable`: `xdg.mimeApps.enable = true`;
      `xdg.mimeApps.defaultApplications."inode/directory" = "com.thisisgm.flea.desktop"`;
@@ -175,20 +221,21 @@ Repo traps that apply throughout:
    Traps: `osConfig` is absent in standalone HM, hence `? null`. Do not use `xdg.portal.*`.
 
 6. **`flake.nix`, final**
-   - `packages.x86_64-linux = { flea; flea-unwrapped = flea.unwrapped; default = flea; }`
-   - `overlays.default = final: prev: { flea = final.callPackage ./nix/package.nix { }; flea-unwrapped = final.flea.unwrapped; }`
+   - `packages.x86_64-linux = { flea; flea-bin = flea.unwrapped; default = flea; }`
+   - `overlays.default = final: prev: { flea = final.callPackage ./nix/package.nix { }; flea-bin = final.flea.unwrapped; }`
    - `nixosModules.{flea,default} = ./nix/nixos-module.nix` and
      `homeManagerModules.{flea,default} = ./nix/hm-module.nix` (plain paths, no flake-pinned package)
    - `formatter.x86_64-linux = nixpkgs.legacyPackages.x86_64-linux.nixfmt`
    - `checks.x86_64-linux`:
-     - `flea-unwrapped-layout` (spec check 2): a runCommand asserting the step 2 paths
+     - `flea-bin-layout` (spec check 2): a runCommand asserting the step 1 paths
      - `flea-services` (spec check 3): every `Exec=` starts with the flea-fhs path
      - `nixos-module` (eval only; it does not build the toplevel closure):
-       `nixpkgs.lib.nixosSystem { system = "x86_64-linux"; modules = [ self.nixosModules.flea { programs.flea.enable = true; programs.flea.optionalDependencies.ffmpeg = true; boot.isContainer = true; system.stateVersion = "26.05"; } ]; }`.
+       `nixpkgs.lib.nixosSystem { system = "x86_64-linux"; modules = [ self.nixosModules.flea { programs.flea.enable = true; programs.flea.optionalDependencies = lib.genAttrs (builtins.attrNames self.packages.x86_64-linux.flea.optionalPackages) (_: true); boot.isContainer = true; system.stateVersion = "26.05"; } ]; }`
+       (every option on, as the spec asks; eval only, so the large optional closures are not built).
        A runCommand whose text is produced by `lib.assertMsg` checks that
        `config.xdg.portal.extraPortals` contains `config.programs.flea.package` and that
        `services.gvfs.enable` is true.
-     - `hm-module`: `home-manager.lib.homeManagerConfiguration { pkgs = nixpkgs.legacyPackages.x86_64-linux; modules = [ self.homeManagerModules.flea { home = { username = "t"; homeDirectory = "/home/t"; stateVersion = "26.05"; }; programs.flea = { enable = true; defaultFileManager.enable = true; filePicker.enable = true; hyprland.bindings.enable = true; }; } ]; }`.
+     - `hm-module`: `home-manager.lib.homeManagerConfiguration { pkgs = nixpkgs.legacyPackages.x86_64-linux; modules = [ self.homeManagerModules.flea { home = { username = "t"; homeDirectory = "/home/t"; stateVersion = "26.05"; }; programs.flea = { enable = true; defaultFileManager.enable = true; filePicker.enable = true; hyprland.bindings.enable = true; htmlPreview = false; optionalDependencies = <all true, as above>; extraPackages = [ pkgs.hello ]; omarchyPath = "/opt/omarchy"; }; } ]; }`.
        Read `config.xdg.configFile`/`xdg.dataFile` `.text` at eval time and assert:
        `flea-binds.lua` has both blocks, `hyprland-portals.conf` has no `default=`, the
        FileManager1 service `Exec=` uses flea-fhs, and the mimeApps entry is set. Eval only,
@@ -200,6 +247,14 @@ Repo traps that apply throughout:
        its assertion, checked via `builtins.tryEval` on the assertion list.
    → verify: `nix flake check -L` passes (I run it).
    Traps: `home-manager` input only for checks, `follows = "nixpkgs"`.
+
+   **Deviations (step 6):** (1) "every option on" excludes `dropbox`, because
+   `dropbox-cli` pulls in the unfree `dropbox`, which nixpkgs refuses to evaluate without
+   `allowUnfree`. The README says so. (2) The FileManager1 `Exec=` pattern goes through
+   `builtins.unsafeDiscardStringContext`, because `lib.hasInfix` rejects a pattern string
+   that refers to a store path. It is only compared as text. (3) `hm-under-nixos` tests the
+   bad case through the NixOS `config.assertions` list, where Home Manager's assertions
+   land, not through `builtins.tryEval`.
 
 7. **Build and check** (me): `nix fmt`, `nix build .#flea -L`, `nix flake check -L`. Fix by
    sending failures back to the step's coder. Commit.
@@ -234,9 +289,9 @@ Repo traps that apply throughout:
 
 | Command | Expected |
 |---|---|
-| `git apply --check /mnt/code/Source-home/GitHub/nixarchy-flea/nix/*.patch` (in a v0.4.0 scratch clone) | no output, exit 0 |
-| `nix build .#flea-unwrapped .#flea -L` | both build, no network in build |
-| `nix flake check -L` | `flea-unwrapped-layout`, `flea-services`, `nixos-module`, `hm-module`, `hm-under-nixos` pass |
+| `nix build .#flea-bin .#flea -L` | both build; only the tarball is fetched; Flea is not compiled |
+| step 3's in-env checks | real-file copies, the shim on PATH, no missing libraries, the jailed binary runs |
+| `nix flake check -L` | `flea-bin-layout`, `flea-services`, `nixos-module`, `hm-module`, `hm-under-nixos` pass |
 | `nix run .#flea -- --version` | `0.4.0` |
 | runtime checks 1–6 (spec) | each recorded pass/fail in the PR |
 
