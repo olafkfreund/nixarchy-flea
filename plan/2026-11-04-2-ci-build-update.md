@@ -15,6 +15,41 @@ reviewers:
 
 # Plan: CI that builds, checks and auto-updates Flea
 
+## Deviations: review corrections (committed with step 1's code)
+
+Codex (gpt-6-sol) and agy reviewed the approved plan. Each correction below fixes a bug
+in it without changing an approved decision, and **overrides the step text below** where
+the two differ:
+
+- **D1 (steps 1, 4) Outputs.** `bump.sh` writes machine output only to the file named by
+  `--output FILE`, one `key=value` per line: `updated=true|false`, and when true, also
+  `old=`, `new=` and `hash=`. Human messages go to stderr. The workflow passes
+  `--output "$GITHUB_OUTPUT"` and gates later steps with
+  `if: steps.bump.outputs.updated == 'true'`. `lock.yml` gates the same way, on
+  `steps.lock.outputs.changed`.
+- **D2 (step 1) `v` prefix.** After validating the tag, use `new=${tag#v}`, and compare
+  and rewrite with the bare `X.Y.Z`.
+- **D3 (step 1) Scope.** The `flea-bin` region starts at the first line matching
+  `^[[:space:]]*flea-bin[[:space:]]*=` and ends at the **first following** line matching
+  `^  };` (its closing brace; lines 81–156 today). If either is missing, exit 2. Count
+  `version`/`hash` lines only inside that region. This survives `nixfmt` wrapping and
+  names like `sevenzip7z`.
+- **D4 (step 3) Format.** Use the flake's formatter, not the registry's:
+  `nix run .#formatter.x86_64-linux -- --check $(git ls-files '*.nix')`.
+- **D5 (step 3) Fresh-repo health.** No skip. Step 7 dispatches `bump.yml` once before
+  protection goes on, so "never run" afterwards is a real failure. On #2's own PR,
+  `schedule-health` may be red, which is expected because that job is not required.
+- **D6 (step 7) Protection payload.** Send typed JSON, with `gh api -X PUT … --input -`:
+  `{"required_status_checks":{"strict":false,"contexts":["check"]},"enforce_admins":false,"required_pull_request_reviews":{"required_approving_review_count":0},"restrictions":null}`.
+  Send the Actions endpoint the same way:
+  `{"default_workflow_permissions":"read","can_approve_pull_request_reviews":true}`.
+- **D7 (steps 7–8) Merge order and the bot-PR test.** `check.yml` cannot run on #1's PR,
+  because #2 brings it. #2's branch contains all of #1, so `check.yml` on **#2's PR** is
+  the run that builds #1's flake (this replaces the spec's "on the #1 PR"). The merge-box
+  test uses the **first lock PR**: same dispatch mechanism, and nixpkgs nearly always
+  moves within a week. `--pretend-current` on `main` gives an empty diff, so it is a
+  script self-check only. The first real bump PR confirms it again.
+
 ## Approved decisions (from spec, self-contained)
 
 - Three workflows, two scripts, README, and repo settings. Built-in `GITHUB_TOKEN` only,
