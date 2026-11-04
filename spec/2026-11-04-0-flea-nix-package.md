@@ -64,7 +64,9 @@ A bump is the version plus one hash.
   and the FHS env provides the loader). Linked libraries: gdk-pixbuf, glib/gobject, libxcb,
   fontconfig, libxkbcommon(-x11), libgcc_s. The `dlopen`ed ones (vulkan, wayland, EGL,
   poppler-glib, libmpv) come from the FHS `/usr/lib` and its `ld.so.cache`.
-- `meta.sourceProvenance = [ binaryNativeCode ]`, `license = mit`.
+- `meta.sourceProvenance = [ binaryNativeCode ]`. `license` is upstream's binary-package
+  list (`packaging/flea-bin/PKGBUILD:12`): asl20, bsd2, bsd3, cc0, isc, mit, mpl20,
+  unicode-30, zlib.
 
 ### Runtime: `flea` = `buildFHSEnv`
 
@@ -77,7 +79,8 @@ jails and trust checks unless the packaging fixes them (below).
 
 - `flea-fhs` = `buildFHSEnv { name = "flea-fhs"; runScript = writeShellScript "exec" ''exec "$@"''; dieWithParent = false; targetPkgs = …; }`.
   - `targetPkgs`: flea-bin; the `bwrap` shim (below) instead of `bubblewrap`; `(python3.withPackages (p: [ p.pygobject3 ]))` plus
-    glib/gobject-introspection typelibs; expect; bat; util-linux (prlimit);
+    glib/gobject-introspection typelibs; expect; bat; util-linux (prlimit); libheif (also ships `heif-thumbnailer`);
+    hicolor-icon-theme;
     gvfs (gio modules); glib (gio); jq; quickjs-ng (qjs); ripgrep; shared-mime-info;
     udisks (udisksctl); usbmuxd; wl-clipboard; xdg-terminal-exec; xdg-utils; poppler-utils;
     mpv; vulkan-loader; libGL; wayland; diffutils; git; quickshell (upstream lists it as a
@@ -184,14 +187,20 @@ binary:
 
 | Loss with plain prebuilt | Cause in upstream code | Fix in packaging |
 |---|---|---|
-| Every jail is broken: tools and libraries are dangling links | jails bind `/usr` and `/etc` only (`sandbox.rs` `BWRAP_FLAGS`, `pv3/sandbox.rs`); FHS `/usr` links into the store | **`bwrap` shim.** Both jails run `bwrap` from PATH (`sandbox.rs` `BWRAP = "bwrap"`, `pv3/sandbox.rs:42`). The FHS env gets a `bin/bwrap` script: `exec ${bubblewrap}/bin/bwrap --ro-bind /nix/store /nix/store "$@"`. The store is read-only and world-readable on NixOS anyway. |
+| Every jail is broken: tools and libraries are dangling links | jails bind `/usr` and `/etc` only (`sandbox.rs` `BWRAP_FLAGS`, `pv3/sandbox.rs`); FHS `/usr` links into the store | **`bwrap` shim.** Both jails run `bwrap` from PATH (`sandbox.rs` `BWRAP = "bwrap"`, `pv3/sandbox.rs:42`, and through `prlimit`'s `execvp`). The FHS env gets a `bin/bwrap` script: `exec ${bubblewrap}/bin/bwrap --ro-bind /nix/store /nix/store --ro-bind ${glibc}/etc ${glibc}/etc "$@"`. The second bind keeps the FHS env's `ld.so.cache` link, which lives on a tmpfs over `${glibc}/etc`. bwrap's binds are recursive, so the first bind should already carry it, but the jailed `flea`/`flea-gui` (thumbnail worker, `/flea-media`) have no RUNPATH, so they depend on that cache. The store is read-only and world-readable on NixOS anyway. |
 | Thumbnails from external thumbnailers (video, PDF) refused | `thumbbind.rs` canonicalizes the tool. A `/nix/store` target is outside `MOUNTED` (`/usr`, `/etc`), so it gets a per-file bind and `trusted()`, which needs uid 0 or the user. In the FHS user namespace, root-owned store files read as the overflow uid, so they fail. | **Real files under `/usr/bin`.** In `buildFHSEnv`'s `extraBuildCommands`, each trust-checked tool's `usr/bin` symlink is replaced by a copy of its target. The canonical path is then `/usr/bin/<tool>`, inside `MOUNTED`, so no bind and no `trusted()` check happen. The copy keeps its store interpreter and runpath, which resolve through the shim's store bind. |
 | LibreOffice previews off | `officepdf.rs:58` needs `canonicalize(soffice)` under `/usr` | the same copy, for `soffice`/`libreoffice` when the optional dep is on |
 | bat colouring off | `codereq.rs:204` needs `canonicalize(bat)` under `/usr` | the same copy, for `bat` |
-| Shelf update fails (EACCES) at the next version | `shelfplugin.rs:72` `std::fs::copy` keeps the store's `0444` mode | **Wrapper.** `bin/flea` and `bin/flea-gui` run `chmod -R u+w "$XDG_CONFIG_HOME/omarchy/plugins/io.github.thisisgm.flea-shelf"` (falling back to `~/.config`, errors ignored) before `exec`. Every launch after an upgrade therefore finds writable files. |
+| Shelf update fails (EACCES) at the next version | `shelfplugin.rs:72` `std::fs::copy` keeps the store's `0444` mode | **FHS `profile`.** `chmod -R u+w "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/io.github.thisisgm.flea-shelf" 2>/dev/null` runs in `flea-fhs`'s profile. Every entry into the env sees it: the `flea` wrappers and the D-Bus-started portal and FileManager1 helpers. The first launch after an upgrade, by any route, therefore finds writable files. |
 
-The copied tools are a fixed list in `package.nix`: `bat`, `ffmpegthumbnailer`,
-`gdk-pixbuf-thumbnailer`, `soffice`, `libreoffice`. Each is copied only if present.
+The copied tools are `bat`, `soffice` and `libreoffice`, plus every program named by an
+`Exec=` or `TryExec=` line in the FHS env's `usr/share/thumbnailers/*.thumbnailer` files.
+This is computed in `extraBuildCommands`, so `heif-thumbnailer`, `ffmpegthumbnailer`,
+`gdk-pixbuf-thumbnailer` and any thumbnailer from `extraPackages` are covered
+automatically. Each is copied only if present, with `cp -L --remove-destination`: the
+entry is a symlink into the read-only store, so copying through it fails. LibreOffice comes
+from the wrapped `pkgs.libreoffice`, whose `bin/soffice` is a script with absolute store
+paths. The unwrapped `soffice` resolves its siblings from `$0` and would break as a copy.
 Copying is limited to these on purpose: relocatable programs such as python find their
 prefix from their own path, and a copy would break them.
 
@@ -233,6 +242,7 @@ prefix from their own path, and a copy would break them.
 | More "must be under /usr" checks than the ones found by grep, or a trust-checked tool not on the copy list. | every host | Runtime checks 3–4 exercise each preview kind. A missing tool is added to the copy list. |
 | Upstream stops shipping the x86_64 tarball, or changes its layout. | bumps | The bump fails at `installPhase` and never reaches `main` (#2). Fallback: the rev. 1 source build from git history. |
 | A copied tool depends on its own location (`/proc/self/exe`) to find data. | runtime | The list is short and each tool is exercised by runtime check 4. Drop a tool from the list if its copy misbehaves (the loss comes back for that tool only). |
+| D-Bus-started helpers get a minimal environment. Flea's shelf switch runs `omarchy` and `omarchy-shell` from PATH (`shelfplugin.rs:94,112`). | portal / FileManager1 launches | The FHS PATH ends with the host PATH. On NixOS the systemd user environment includes `/run/current-system/sw/bin`. Runtime checks 7–8 open Flea that way. |
 | `usr/bin` in the FHS root is a whole-directory symlink (buildEnv collapses a dir with one source), so it cannot be written. | build | With dozens of packages it is a merged real directory. The plan's build check asserts the copies are regular files. |
 | Apps opened from Flea start inside its namespace (its `/usr`, env). NixOS apps use store paths, so this is mostly harmless. Apps that read `/usr/share/applications` see Flea's profile. | every host | `dieWithParent = false`. Runtime check 6 opens an image and a PDF from Flea. |
 | Vulkan ICDs: the loader inside the FHS needs `/run/opengl-driver` (host bind) and its `share/vulkan/icd.d`. | GPU hosts | buildFHSEnv already binds `/run` and adds the opengl-driver lib path. Runtime check 2. Flea falls back to GL. |
