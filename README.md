@@ -8,8 +8,9 @@ Supported platform: `x86_64-linux` only.
 
 Flea is packaged from upstream's prebuilt release binaries (`flea-bin`) without patching or recompiling, and runs inside a `buildFHSEnv` (`flea-fhs`). To work on NixOS without source patches, the FHS environment does three things:
 
-- **Bubblewrap shim (`bwrap`)**: wraps `bwrap` to append `--ro-bind /nix/store /nix/store` and `--ro-bind ${glibc}/etc ${glibc}/etc` so binaries and libraries inside Flea's inner sandbox resolve `/nix/store` paths.
-- **Real-file copies of trust-checked tools**: replaces `/usr/bin` symlinks with real file copies for `bat`, `soffice`, `libreoffice`, and every binary named in `/usr/share/thumbnailers/*.thumbnailer`, satisfying Flea's symlink/ownership checks.
+- **Bubblewrap shim (`bwrap`)**: wraps `bwrap` and puts `--ro-bind /nix/store /nix/store` and `--ro-bind ${glibc}/etc ${glibc}/etc` before Flea's own arguments, so binaries and libraries inside Flea's inner sandbox resolve `/nix/store` paths. It also adds `--ro-bind-try /.host-etc /.host-etc`: inside `buildFHSEnv`, `/etc` entries link there, and without it fonts and other host `/etc` files would be missing in the jails.
+- **Real-file copies of trust-checked tools**: replaces `/usr/bin` symlinks with real file copies for `bat`, `soffice`, `libreoffice`, and every binary named in `/usr/share/thumbnailers/*.thumbnailer`. It also rewrites those `.thumbnailer` files to point at the `/usr/bin` copies, which satisfies Flea's symlink/ownership checks.
+- **`qml6` for HTML previews**: a small `qml6` wrapper (Arch's name for Qt's QML runner) that sets the QML import path, so the HTML preview jail finds QtWebEngine.
 - **Shelf permissions**: runs `chmod -R u+w` on `~/.config/omarchy/plugins/io.github.thisisgm.flea-shelf` in the FHS profile so Flea can update its shelf plugin after copying read-only files from the Nix store.
 
 ## Try it
@@ -133,7 +134,9 @@ When `programs.flea.enable` is on in NixOS, set the runtime and dependency optio
 programs.flea.omarchyPath = "/etc/profiles/per-user/alice/share/omarchy";
 ```
 
-Or in shell syntax: `/etc/profiles/per-user/$USER/share/omarchy`.
+Write the user name out in full: Nix does not expand `$USER` here. The NixOS package is
+system-wide, so a per-user path serves only that one user. In that case, set it in the
+Home Manager module (without the NixOS module) instead.
 
 ### Hyprland bindings
 
@@ -162,6 +165,19 @@ mv ~/.config/xdg-desktop-portal/hyprland-portals.conf \
 ```
 
 Alternatively, set `xdg.configFile."xdg-desktop-portal/hyprland-portals.conf".force = true;` in Home Manager.
+
+### Default file manager and first switch
+
+`defaultFileManager.enable` turns on Home Manager's `xdg.mimeApps`, which then owns
+`~/.config/mimeapps.list`. If that file is still a mutable file, move it aside before the
+first switch, the same way as `hyprland-portals.conf`, and carry the associations you want
+to keep into `xdg.mimeApps`.
+
+### Sandbox note
+
+The `bwrap` shim makes the whole `/nix/store` readable, read-only, inside Flea's preview
+jails. That is no more than any process on NixOS can read, but it is more than upstream's
+Arch jail sees. The jails still have no network, and see only the one file being previewed, not the rest of your home directory.
 
 ### Warning: do not mix with Flea's imperative toggles
 
