@@ -227,6 +227,14 @@ Repo traps that apply throughout:
    → verify: `nix flake check -L` passes (I run it).
    Traps: `home-manager` input only for checks, `follows = "nixpkgs"`.
 
+   **Deviations (step 6):** (1) "every option on" excludes `dropbox`, because
+   `dropbox-cli` pulls in the unfree `dropbox`, which nixpkgs refuses to evaluate without
+   `allowUnfree`. The README says so. (2) The FileManager1 `Exec=` pattern goes through
+   `builtins.unsafeDiscardStringContext`, because `lib.hasInfix` rejects a pattern string
+   that refers to a store path. It is only compared as text. (3) `hm-under-nixos` tests the
+   bad case through the NixOS `config.assertions` list, where Home Manager's assertions
+   land, not through `builtins.tryEval`.
+
 7. **Build and check** (me): `nix fmt`, `nix build .#flea -L`, `nix flake check -L`. Fix by
    sending failures back to the step's coder. Commit.
 
