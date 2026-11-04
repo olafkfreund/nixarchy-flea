@@ -43,6 +43,9 @@ the two differ:
   `{"required_status_checks":{"strict":false,"contexts":["check"]},"enforce_admins":false,"required_pull_request_reviews":{"required_approving_review_count":0},"restrictions":null}`.
   Send the Actions endpoint the same way:
   `{"default_workflow_permissions":"read","can_approve_pull_request_reviews":true}`.
+- **D8 (step 4) pretend dispatch.** A `pretend_current` dispatch on `main` stops before
+  the PR step (`inputs.pretend_current == ''`). The tree is unchanged, so a commit would
+  fail and file a false `bump-failed` issue.
 - **D7 (steps 7–8) Merge order and the bot-PR test.** `check.yml` cannot run on #1's PR,
   because #2 brings it. #2's branch contains all of #1, so `check.yml` on **#2's PR** is
   the run that builds #1's flake (this replaces the spec's "on the #1 PR"). The merge-box

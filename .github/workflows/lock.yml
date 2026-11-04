@@ -1,0 +1,94 @@
+name: lock
+
+on:
+  schedule:
+    - cron: "47 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: lock
+  cancel-in-progress: false
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      BRANCH: chore/flake-lock
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+
+      - id: lock
+        name: nix flake update
+        run: |
+          nix flake metadata --json > "$RUNNER_TEMP/before.json"
+          nix flake update
+          if git diff --quiet flake.lock; then
+            echo "flake.lock unchanged" >&2
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.lock.outputs.changed == 'true'
+        name: build, check, smoke
+        run: |
+          nix build .#flea -L
+          nix flake check -L
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fhs=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.flea.fhs)
+          "$fhs/bin/flea-fhs" sh -c "! ldd /usr/bin/flea /usr/bin/flea-gui | grep 'not found'"
+          "$fhs/bin/flea-fhs" sh -c 'bwrap --ro-bind /usr /usr --ro-bind /etc /etc --symlink usr/lib /lib --ro-bind-try /lib64 /lib64 --proc /proc --dev /dev --unshare-all -- /usr/bin/flea --version'
+
+      - if: steps.lock.outputs.changed == 'true'
+        name: open or update the PR
+        run: |
+          nix flake metadata --json > "$RUNNER_TEMP/after.json"
+          {
+            echo "Weekly nixpkgs refresh. Inputs, before → after:"
+            echo
+            jq -rn --slurpfile b "$RUNNER_TEMP/before.json" --slurpfile a "$RUNNER_TEMP/after.json" '
+              $a[0].locks.nodes | to_entries[] | select(.value.locked.rev?) |
+              "- `\(.key)`: \($b[0].locks.nodes[.key].locked.rev[0:12] // "new") → \(.value.locked.rev[0:12])"'
+          } > "$RUNNER_TEMP/body.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$BRANCH"
+          git commit -am "flake.lock: update nixpkgs"
+          git push -f origin HEAD
+          if gh pr view "$BRANCH" -R "$REPO" >/dev/null 2>&1; then
+            gh pr edit "$BRANCH" -R "$REPO" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create -R "$REPO" --base main --head "$BRANCH" --title "flake.lock: update nixpkgs" --body-file "$RUNNER_TEMP/body.md"
+          fi
+          gh workflow run check.yml -R "$REPO" --ref "$BRANCH"
+
+      - name: close the failure issue
+        run: |
+          n=$(gh issue list -R "$REPO" -l lock-failed -s open --json number -q '.[0].number // empty')
+          if [ -n "$n" ]; then gh issue close "$n" -R "$REPO" -c "Recovered in $RUN_URL"; fi
+
+      - if: failure()
+        name: report the failure
+        run: |
+          n=$(gh issue list -R "$REPO" -l lock-failed -s open --json number -q '.[0].number // empty')
+          msg="lock refresh failed: $RUN_URL"
+          if [ -n "$n" ]; then
+            gh issue comment "$n" -R "$REPO" -b "$msg"
+          else
+            gh issue create -R "$REPO" -l lock-failed -t "flake.lock refresh failed" -b "$msg"
+          fi

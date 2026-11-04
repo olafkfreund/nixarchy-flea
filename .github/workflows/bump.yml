@@ -1,0 +1,94 @@
+name: bump
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      pretend_current:
+        description: "Pretend the packaged version is this X.Y.Z (self-check)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+
+      - id: bump
+        name: bump.sh
+        env:
+          PRETEND: ${{ inputs.pretend_current }}
+        run: |
+          args=(--output "$GITHUB_OUTPUT")
+          if [ -n "${PRETEND:-}" ]; then args+=(--pretend-current "$PRETEND"); fi
+          scripts/bump.sh "${args[@]}"
+
+      - if: steps.bump.outputs.updated == 'true'
+        name: build, check, smoke
+        run: |
+          nix build .#flea -L
+          nix flake check -L
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fhs=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.flea.fhs)
+          "$fhs/bin/flea-fhs" sh -c "! ldd /usr/bin/flea /usr/bin/flea-gui | grep 'not found'"
+          "$fhs/bin/flea-fhs" sh -c 'bwrap --ro-bind /usr /usr --ro-bind /etc /etc --symlink usr/lib /lib --ro-bind-try /lib64 /lib64 --proc /proc --dev /dev --unshare-all -- /usr/bin/flea --version'
+
+      # pretend_current is a self-check: the tree on main is unchanged, so there is nothing to propose.
+      - if: steps.bump.outputs.updated == 'true' && inputs.pretend_current == ''
+        name: open or update the PR
+        env:
+          OLD: ${{ steps.bump.outputs.old }}
+          NEW: ${{ steps.bump.outputs.new }}
+        run: |
+          branch="bump/flea-v$NEW"
+          scripts/upstream-diff.sh "v$OLD" "v$NEW" > "$RUNNER_TEMP/body.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git commit -am "flea: $OLD -> $NEW"
+          git push -f origin HEAD
+          if gh pr view "$branch" -R "$REPO" >/dev/null 2>&1; then
+            gh pr edit "$branch" -R "$REPO" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create -R "$REPO" --base main --head "$branch" --title "flea: $OLD -> $NEW" --body-file "$RUNNER_TEMP/body.md"
+          fi
+          # A GITHUB_TOKEN may start workflow_dispatch runs, so the required check runs without approval.
+          gh workflow run check.yml -R "$REPO" --ref "$branch"
+
+      - name: close the failure issue
+        run: |
+          n=$(gh issue list -R "$REPO" -l bump-failed -s open --json number -q '.[0].number // empty')
+          if [ -n "$n" ]; then gh issue close "$n" -R "$REPO" -c "Recovered in $RUN_URL"; fi
+
+      - if: failure()
+        name: report the failure
+        run: |
+          n=$(gh issue list -R "$REPO" -l bump-failed -s open --json number -q '.[0].number // empty')
+          msg="bump failed: $RUN_URL"
+          if [ -n "$n" ]; then
+            gh issue comment "$n" -R "$REPO" -b "$msg"
+          else
+            gh issue create -R "$REPO" -l bump-failed -t "Flea bump failed" -b "$msg"
+          fi
