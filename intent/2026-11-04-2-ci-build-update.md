@@ -4,7 +4,12 @@ issue: 2
 author: olafkfreund
 ---
 
-# Intent: CI that builds, tests and auto-updates Flea, and publishes the latest build
+# Intent: CI that builds, checks and auto-updates Flea
+
+> **Revision 2 (2026-11-04):** #1 switched to upstream's prebuilt release binaries (#1 spec
+> rev. 2), so nothing heavy is compiled. The binary cache, its signing key and quota, and
+> the runner disk and time limits are gone from scope. Upstream's tarball is the
+> "prebuilt" artifact, and GitHub serves it.
 
 ## Problem
 
@@ -12,101 +17,72 @@ The repo (github.com/olafkfreund/nixarchy-flea, public) has no CI. Nothing prove
 `main` builds, that the modules evaluate, or that a change did not break the package.
 
 Upstream `thisisgm/flea` releases often: v0.3.11 on 2026-10-15, v0.3.12 on 2026-10-16,
-v0.4.0 on 2026-11-03. Each bump means a new version, a source hash, and a cargo
-`outputHashes` entry when the GPUI fork rev moves. The two `.patch` files may also stop
-applying. Done by hand, this falls behind quickly.
-
-A consumer (nixarchy) that takes this flake as an input would compile Flea locally on
-every update. That is the GPUI workspace with LTO and one codegen unit, so it is slow. It
-also has no signal that a given `main` commit is known to build.
+v0.4.0 on 2026-11-03. Each release means a new version and a new tarball hash in
+`nix/package.nix`. A release can also change the tarball layout, which breaks `installPhase`,
+or add code that the packaging fixes don't cover: a new jail, a new `/usr` trust check, a
+new thumbnailer. Done by hand, this falls behind quickly, and nixarchy stays on an old
+Flea.
 
 ## Proposed outcome
 
-- Every PR and every push to `main` builds `.#flea` and runs the flake's defined checks
-  (layout, service `Exec=` lines, module evaluation, formatting). That is the whole claim:
-  upstream's test suite is off (#1 plan), so CI proves "builds and evaluates", not "works".
+- Every PR and every push to `main` builds `.#flea` and runs `nix flake check` (layout,
+  service `Exec=` lines, module evaluation, formatting). That is the whole claim. CI
+  proves "builds and evaluates", not "works on the desktop", and the README says so.
   A required check blocks merging, through branch protection.
-- A scheduled job detects a new upstream release. It bumps the version, the source hash
-  and the cargo git hashes, including a new `outputHashes` **key** when upstream's
-  `Cargo.lock` changes a git crate's name or version. It confirms the patches still
-  apply and opens a PR that runs the same checks.
-- A bump that cannot resolve hashes or apply patches never advances `main`, and it never
-  fails silently in a cron log. It opens or updates an issue or a draft PR saying which
+- A scheduled job detects a new upstream release. It sets the version and the tarball hash,
+  cross-checked against upstream's published `.sha256`. It builds and checks, then opens a
+  PR. The PR body lists what changed upstream in the files the packaging fixes depend on
+  (`src/backend/sandbox.rs`, `thumbbind.rs`, `officepdf.rs`, `codereq.rs`, `shelfplugin.rs`,
+  `crates/flea-gui/src/g2/pv3/sandbox.rs`, `packaging/flea-bin/PKGBUILD`) and any new
+  `"/usr` literal, for human review.
+- A bump that fails (hash mismatch, layout change, a failing check) never advances `main`.
+  It never fails silently in a cron log either: it opens or updates one issue saying which
   step failed.
 - `nixpkgs` in `flake.lock` is refreshed on a schedule through the same PR + checks path.
-- Built outputs (`flea` and `flea-unwrapped`, the expensive Rust build) are pushed to a
-  public binary cache, and only after a successful build of a commit on `main`. A
-  consumer that evaluates the same derivation downloads it instead of compiling it.
-  CI verifies that the cache actually serves the pushed paths.
-- "Use the latest build" means "follow `main`", with a stated guarantee: every `main`
-  commit passed the PR checks, and its outputs are in the cache once the push job is
-  green. A cache miss (upload not finished or failed, a different nixpkgs, an override)
-  makes Nix compile locally. That is slower, not broken.
+- "Use the latest build" means "follow `main`". Every `main` commit passed the checks,
+  and a consumer's rebuild is a tarball download plus the FHS env assembly. No
+  compiling, so no binary cache is needed.
 
 ## Affected users and systems
 
-- This repo: `.github/workflows/`, `flake.lock`, `nix/package.nix` (version and hashes
-  only, changed by the bot), README (badge, cache instructions).
-- GitHub Actions on hosted x86_64 runners, repo settings (branch protection, secrets).
-- Consumers: nixarchy hosts, which gain a substituter entry.
+- This repo: `.github/workflows/`, `flake.lock`, `nix/package.nix` (version and hash only,
+  changed by the bot), README (badge, "what CI proves").
+- GitHub Actions on hosted x86_64 runners, repo settings (branch protection, Actions
+  permission to create PRs).
+- Consumers: nixarchy, which follows `main`. Nothing to configure.
 
 ## Constraints
 
-- Depends on #1: the workflows run the flake that #1 produces, so this branch is based
-  on `feat/flea-nix-package` and merges after it.
-- Standard public Linux runners: 4 vCPU, 16 GB RAM, about 14 GB SSD **in total**, and a
-  6-hour job limit. A cold LTO + `codegen-units = 1` build of the GPUI workspace, plus a
-  closure with qt6-webengine, risks disk, RAM (LTO link) and time. A measured cold build
-  within the chosen runner's limits is an acceptance condition before hosted CI counts
-  as viable.
+- Depends on #1: the workflows run the flake that #1 produces, so this branch is based on
+  `feat/flea-nix-package` and merges after it.
 - Tokens: events caused by the default `GITHUB_TOKEN` traditionally do not start new
-  workflow runs. That covers a bot PR's checks and the `push` run after a bot merge, which
-  is what pushes to the cache. Reviewers disagree on whether GitHub now starts such PR runs
-  pending approval. The spec settles it from current docs. Either way, a GitHub App or
-  PAT is needed if bump PRs must be checked, merged and cached without you.
-- **Trust boundary in a public repo:** PR code is untrusted, since a build runs whatever
-  the PR's Nix says. PR workflows get no cache-write token, signing key or write-scoped
-  token, and `pull_request_target` never builds PR code. Cache publication runs only on
-  `push` to `main` (and release tags), from code already reviewed into `main`.
-- Cache trust: consumers trust the cache's public signing key, and whoever holds the
-  private key can serve them anything. The key lives only in repo secrets, is documented
-  in the README, and is used only by the `main` publish job.
-- Cache size: free tiers are small (Cachix free is 5 GB). Push only paths that are not
-  already on `cache.nixos.org`, i.e. Flea's own outputs, not nixpkgs dependencies.
-- Patch rot has two forms. A patch that fails to apply is caught by the build. A patch
-  that applies but no longer covers new upstream code (a new jail, a new `/usr` check) is
-  not. Each bump PR lists the upstream changes to `sandbox.rs`, `thumbbind.rs`,
-  `shelfplugin.rs` and any new `"/usr` literal, for human review.
+  workflow runs. That affects a bot PR's checks. The rev. 1 reviewers disagreed on whether
+  GitHub now starts them pending approval, and the spec settles it from current docs.
+  Either way, a GitHub App or a PAT is needed if bump PRs must be checked and merged
+  without you.
+- **Trust boundary in a public repo:** PR code is untrusted. PR workflows get only a
+  read-only token, and `pull_request_target` never builds PR code. With no cache, no
+  workflow holds a publishing secret. Only the bump job writes (a branch and a PR), and it
+  runs on `schedule`/`workflow_dispatch` from `main`'s own code.
+- Upstream supply chain: the tarball is upstream's binary, which runs on your desktop. The
+  bump verifies it against upstream's `.sha256` from the same release. That proves
+  integrity, not provenance: upstream signs nothing. Auto-merging a bump means trusting
+  upstream's release account. That is open question 2.
 - Scheduled workflows are best effort. GitHub delays them, and disables them in public
   repos after 60 days without activity. Something must keep the schedule alive, or report
   that it stopped.
-- The runtime checks from #1 (GUI, portal, gvfs, GPU) cannot run in CI. CI proves "builds
-  and evaluates", not "works on the desktop", and the README must say so.
 - Pin every Action to a commit SHA (supply-chain hygiene for a public repo).
 
 ## Open questions
 
-0. **How should consumers get cache hits?** The #1 modules build Flea from the
-   *consumer's* `pkgs` (`pkgs.callPackage`). Unless nixarchy's nixpkgs rev equals this
-   flake's lock, every store path differs and the cache never hits. Options: (a) nixarchy
-   sets `programs.flea.package = inputs.nixarchy-flea.packages.x86_64-linux.flea`, with no
-   `nixpkgs.follows` (cache hits, a second nixpkgs in the closure); (b) keep `follows` and
-   accept local builds; (c) change #1's module default to the flake's own package (a #1
-   spec change). This decides whether the cache is worth having at all.
-
-1. "Latest build": the latest upstream **release** (tags) only, or also a `flea-git`
-   package that tracks upstream `main`?
-2. Binary cache: who operates it and holds its key? Cachix (hosted, 5 GB free, an
-   auth-token secret), FlakeHub Cache, or your own attic on p510 (needs public ingress
-   and uptime fit for a public repo)?
-3. Bump PRs: auto-merge when checks pass, or always wait for your review?
-4. Schedule: how often to look for upstream releases (daily?) and to refresh nixpkgs
-   (weekly?).
-5. Bot identity, coupled with 3: with auto-merge and branch protection that requires a
-   review, a PAT tied to your account cannot approve its own PR. A GitHub App (or a
-   ruleset bypass for it) can. App, PAT, or neither (bump PRs wait for you, and checks run
-   on your approval)?
-6. Releases in this repo: tag each bump (e.g. `v0.4.0-1`) so consumers can pin a version,
-   or is following `main` enough?
-7. Cache roots: push both `.#flea` and `.#flea-unwrapped`, so the Rust build is reused
-   when a consumer enables optional dependencies (only the cheap FHS wrapper rebuilds)?
+1. "Latest build": upstream **releases** only, or also a `flea-git` package built from
+   upstream `main`? That would bring back the source build, a cache, and the 12-minute
+   compile.
+2. Bump PRs: auto-merge when checks pass (you trust upstream's releases as-is), or always
+   wait for your review (the PR lists the upstream changes that matter)?
+3. Bot identity, coupled with 2: auto-merge needs a GitHub App or a PAT. With "always
+   review", the built-in token is enough, and checks run on your approval or when you
+   push to the PR.
+4. Schedule: look for upstream releases daily, and refresh nixpkgs weekly?
+5. Tag each bump in this repo (e.g. `v0.4.0-1`) so consumers can pin, or is following
+   `main` enough?
