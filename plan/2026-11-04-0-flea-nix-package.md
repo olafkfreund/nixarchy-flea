@@ -101,7 +101,7 @@ Repo traps that apply throughout:
      is still `#!/usr/bin/python3`; then
      `ls result/share/flea/ui/boot/shell.qml result/lib/flea/` shows the 5 helpers, and
      `grep '"version": "0.4.0-1"' result/share/flea/shelf/manifest.json` matches.
-   Traps: `$releaseDir` is set by `cargoBuildHook`. The `build.rs` linker probe may print
+   Traps: **Deviation:** `$releaseDir` turned out to be unset in `installPhase` on current nixpkgs, so the binaries are copied from `target/${stdenv.hostPlatform.rust.cargoShortTarget}/release/`. The `build.rs` linker probe may print
    a warning, which is fine. The Makefile `sed -i` writes into `$out`, so it is writable.
 
 3. **`nix/package.nix`, part 2: `flea-fhs` and `flea`**. The file becomes a function
