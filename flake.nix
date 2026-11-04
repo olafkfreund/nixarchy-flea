@@ -105,7 +105,7 @@
 
       overlays.default = final: _prev: {
         flea = final.callPackage ./nix/package.nix { };
-        flea-bin = final.flea.unwrapped;
+        flea-bin = (final.callPackage ./nix/package.nix { }).unwrapped;
       };
 
       nixosModules = {
@@ -140,6 +140,20 @@
             n=$((n + 1))
           done
           test "$n" -eq 2
+          touch $out
+        '';
+
+        fhs-rootfs = pkgs.runCommand "fhs-rootfs" { r = flea.fhs.fhsenv; } ''
+          set -eu
+          for f in "$r"/usr/share/thumbnailers/*.thumbnailer; do
+            test ! -L "$f" || { echo "$f is still a symlink" >&2; exit 1; }
+            if grep -qE '^(Try)?Exec=/nix/store/' "$f"; then echo "$f still names a store path" >&2; exit 1; fi
+            for p in $(sed -nE 's#^(Try)?Exec=(/usr/bin/[^ ]+).*#\2#p' "$f"); do
+              test -f "$r$p" -a ! -L "$r$p" || { echo "$p is not a real file" >&2; exit 1; }
+            done
+          done
+          test -x "$r/usr/bin/qml6"
+          test -d "$r/usr/lib64/qt-6/qml/QtWebEngine"
           touch $out
         '';
 

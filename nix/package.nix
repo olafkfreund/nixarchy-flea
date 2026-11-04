@@ -59,9 +59,17 @@
 let
   omarchyLink =
     runCommand "flea-omarchy-link" { }
-      "mkdir -p $out/share; ln -s ${omarchyPath} $out/share/omarchy";
+      "mkdir -p $out/share; ln -s ${lib.escapeShellArg omarchyPath} $out/share/omarchy";
   bwrapShim = writeShellScriptBin "bwrap" ''
-    exec ${bubblewrap}/bin/bwrap --ro-bind /nix/store /nix/store --ro-bind ${glibc}/etc ${glibc}/etc "$@"
+    # /.host-etc: inside buildFHSEnv, /etc entries link there; Flea's jails bind /etc as on Arch.
+    exec ${bubblewrap}/bin/bwrap --ro-bind /nix/store /nix/store --ro-bind ${glibc}/etc ${glibc}/etc \
+      --ro-bind-try /.host-etc /.host-etc "$@"
+  '';
+  # Flea's HTML preview jail runs /usr/bin/qml6 (Arch's name) after --clearenv; nixpkgs ships `qml`
+  # and finds QtWebEngine's QML modules only through an import path.
+  qml6Shim = writeShellScriptBin "qml6" ''
+    export QML_IMPORT_PATH=/usr/lib/qt-6/qml NIXPKGS_QT6_QML_IMPORT_PATH=/usr/lib/qt-6/qml
+    exec /usr/bin/qml "$@"
   '';
   sevenzip7z = runCommand "7z-link" { } "mkdir -p $out/bin; ln -s ${_7zz}/bin/7zz $out/bin/7z";
   optionalPackages = {
@@ -176,6 +184,14 @@ let
         real=$(readlink -f "$p"); rm "$p"; cp "$real" "$p"
         echo "flea-fhs: real file $t"
       done
+      # nixpkgs .thumbnailer files name absolute store paths, which Flea's trust check refuses;
+      # point them at the /usr/bin copies made above.
+      for f in "$out"/usr/share/thumbnailers/*.thumbnailer; do
+        [ -L "$f" ] || continue
+        real=$(readlink -f "$f"); rm "$f"
+        sed -E 's#^((Try)?Exec=)/nix/store/[^/]+/bin/#\1/usr/bin/#' "$real" > "$f"
+        echo "flea-fhs: rewrote $(basename "$f")"
+      done
     '';
     targetPkgs =
       p:
@@ -219,6 +235,7 @@ let
       ++ lib.optionals withHtmlPreview [
         qt6.qtdeclarative
         qt6.qtwebengine
+        qml6Shim
       ]
       ++ extraPackages;
   };

@@ -19,7 +19,8 @@ let
     lib.filterAttrs (name: _: cfg.optionalDependencies.${name}) base.optionalPackages
   );
   # Option defaults count as defined; only a higher-priority definition is user-supplied.
-  explicitlyDefined = option: option.isDefined && option.highestPrio < 1500;
+  # (mkDefault, 1000, in a shared profile is not counted as a user choice.)
+  explicitlyDefined = option: option.isDefined && option.highestPrio < 1000;
 in
 {
   options.programs.flea = {
@@ -97,8 +98,9 @@ in
                 || lib.any explicitlyDefined (builtins.attrValues options.programs.flea.optionalDependencies)
                 || explicitlyDefined options.programs.flea.extraPackages
                 || explicitlyDefined options.programs.flea.omarchyPath
+                || explicitlyDefined options.programs.flea.package
               );
-            message = "programs.flea: set htmlPreview/optionalDependencies/extraPackages in the NixOS module; Home Manager uses its package";
+            message = "programs.flea: with the NixOS module enabled, set htmlPreview, optionalDependencies, extraPackages, omarchyPath and package there; Home Manager reuses the NixOS package";
           }
         ];
         home.packages = [ cfg.package ];
@@ -111,7 +113,9 @@ in
           # Written by Home Manager programs.flea.defaultFileManager.
           [D-BUS Service]
           Name=org.freedesktop.FileManager1
-          Exec=${cfg.package.fhs}/bin/flea-fhs /usr/lib/flea/flea-filemanager1
+          Exec=${
+            cfg.package.fhs or (throw "programs.flea.package must be this flake's flea (it needs passthru.fhs)")
+          }/bin/flea-fhs /usr/lib/flea/flea-filemanager1
         '';
       })
 

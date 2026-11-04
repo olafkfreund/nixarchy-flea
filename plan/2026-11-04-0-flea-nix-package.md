@@ -142,6 +142,27 @@ Repo traps that apply throughout:
    `7zz`, hence the link. `profile` runs for every entry, including D-Bus helpers, so it
    must never fail: hence `|| true`.
 
+   **Deviations (step 3, from the step 10 reviews; each checked at runtime):**
+   - `.thumbnailer` files named absolute store paths, so the `/usr/bin` copies went
+     unused. `extraBuildCommands` now replaces them with copies whose `Exec=`/`TryExec=`
+     use `/usr/bin/<tool>`. Checked: `gdk-pixbuf-thumbnailer` made a 32×32 PNG in a
+     `--clearenv` jail.
+   - Flea's HTML jail runs `/usr/bin/qml6` (Arch's name), and nixpkgs ships `qml`. A
+     `qml6` wrapper (only with `withHtmlPreview`) sets `QML_IMPORT_PATH` and execs `qml`.
+     Checked: it imports QtWebEngine under the HTML jail's exact `--setenv` set.
+   - Inside buildFHSEnv, `/etc/*` link to `/.host-etc/*`, which Flea's jails did not bind,
+     so fonts and every host `/etc` file dangled. The shim adds
+     `--ro-bind-try /.host-etc /.host-etc` (parity with Arch, where jails see all of
+     `/etc`). Checked: `fc-match sans` works in a jail.
+   - `omarchyPath` is passed through `lib.escapeShellArg`.
+   **Deviations (step 5, reviews):** the assertion counts priority < 1000 as user-set
+   (`mkDefault` in a shared profile is not), also covers `package`, and names every
+   option. A `package` without `passthru.fhs` fails with a clear `throw`.
+   **Deviation (step 6, review):** the overlay's `flea-bin` is computed on its own, not
+   from `final.flea`, so a later overlay's `flea` cannot break it. A new check,
+   `fhs-rootfs`, asserts that the thumbnailer rewrite, the real files, `qml6` and the
+   QtWebEngine QML dir exist.
+
    **Deviation (steps 4–5):** `base` is `pkgs.flea` only if it carries `optionalPackages`
    (i.e. it is ours). Otherwise it is `pkgs.callPackage ./package.nix { }`, so that a future,
    different nixpkgs `flea` cannot silently replace it.
