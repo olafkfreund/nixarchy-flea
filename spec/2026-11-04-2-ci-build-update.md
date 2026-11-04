@@ -39,7 +39,18 @@ README.md                     badge + "what CI proves"
   3. `nix build .#flea -L`
   4. `nix flake check -L` (the #1 checks: layout, service `Exec=` lines, both module
      evals, hm-under-nixos)
-  5. format: `nix fmt -- --ci` if the formatter supports it, else
+  5. **smoke** (agy finding): prebuilt binaries are no longer linked at build time, so
+     steps 3–4 would pass even if a new upstream binary needs a library or a glibc that the
+     FHS env lacks. Steps:
+     - `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. Ubuntu 24.04
+       runners block the unprivileged user namespaces that bwrap and buildFHSEnv need.
+     - `fhs=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.flea.fhs)`
+     - Then the #1 plan step 3 in-env checks, run as `$fhs/bin/flea-fhs sh -c '…'`:
+       `! ldd /usr/bin/flea /usr/bin/flea-gui | grep -q 'not found'`, `/usr/bin/flea --version`
+       equals the packaged version, `bat` is a real file, `bwrap` is the shim, and one
+       jailed `flea --version` through the shim.
+     This is the strongest headless proof available. It still cannot show the GUI.
+  6. format: `nix fmt -- --ci` if the formatter supports it, else
      `nix run .#formatter.x86_64-linux -- --check $(git ls-files '*.nix')`. This is a CI
      step, not a flake check (Codex finding 2).
 - No `pull_request_target`, anywhere in the repo.
@@ -64,7 +75,8 @@ README.md                     badge + "what CI proves"
        checksum. That proves integrity only; the release is unsigned (Codex finding 4).
      - rewrites the `version` and `hash` lines (the tarball hash is the only
        `hash = "sha256-…"` in `flea-bin`; the script asserts exactly one match each)
-     - runs `nix build .#flea -L` and `nix flake check -L` locally in the job
+     - runs `nix build .#flea -L`, `nix flake check -L` and the smoke step (same sysctl)
+       locally in the job, so a bump PR exists only if the new binary actually loads
   3. `scripts/upstream-diff.sh v$OLD v$NEW` writes the PR body. It uses
      `gh api repos/thisisgm/flea/compare/v$OLD...v$NEW` and lists changes to the files the
      packaging fixes depend on: `src/backend/sandbox.rs`, `src/backend/thumbbind.rs`,
@@ -78,8 +90,10 @@ README.md                     badge + "what CI proves"
   5. `gh workflow run check.yml --ref bump/flea-v$NEW`. `workflow_dispatch` is one of the
      two events a `GITHUB_TOKEN` may trigger, so this run starts without approval. It
      reports a `check` check run on the branch head, which is what branch protection asks
-     for. The PR's own `pull_request` run, created by `GITHUB_TOKEN`, waits for your
-     "Approve and run" (Codex finding 3). Either one satisfies the required check.
+     for. Reviewers disagree on the PR's own `pull_request` run. Codex, citing current
+     docs, says it is created and waits for "Approve and run". agy says it is not created
+     at all. The dispatched run makes the design independent of who is right. If neither
+     shows up, closing and reopening the PR (as you) or pushing to it starts the check.
   6. `if: failure()`: `gh issue create` or `gh issue comment` on the one open issue with
      label `bump-failed`, naming the step and linking the run. When a later bump succeeds,
      it closes that issue.
@@ -131,6 +145,9 @@ manual schedule check.
   tarball plus nixpkgs paths from `cache.nixos.org`. buildFHSEnv's small init and rootfs
   builder also build once, cold. A cache would add a key to protect and a quota, for
   minutes saved at most.
+- **Auto-merging lock PRs only** (agy suggestion: a nixpkgs refresh has no upstream Flea
+  diff to read). It still needs an App or PAT to merge so that `main`'s push check runs,
+  and decision 3 rules that out. Revisit together with auto-merge.
 - **Auto-merge with a GitHub App.** Possible later. It means trusting upstream's unsigned
   releases unreviewed. Rejected by decision 2.
 - **Renovate/Dependabot for the version bump.** Neither knows a Nix `fetchurl` hash plus
@@ -151,11 +168,14 @@ manual schedule check.
 | Upstream ships a release whose layout breaks `installPhase`, or adds code our fixes don't cover. | The build fails (layout), or the PR's upstream-diff list flags it for your review (coverage). The runtime checks in #1 stay manual. |
 | `gh workflow run` on a branch: GitHub could change which events `GITHUB_TOKEN` may trigger. | The PR's own approval-required run still exists. The worst case is one extra click. |
 | The dispatched check reports on the branch SHA, and a later force-push makes it stale. | The bot dispatches after every push. Branch protection evaluates the head SHA. |
+| The runner's AppArmor userns restriction changes name or is enforced differently. | The smoke step fails loudly, not silently. Fallback: run the smoke step in a NixOS container, or drop it and keep the build + eval checks. |
 | A pinned Action SHA goes stale. | Out of scope: bump them by hand. The README lists the pins. |
 
 ## Verification
 
 1. `actionlint` (via `nix run nixpkgs#actionlint`) passes on all three workflows.
+1a. The smoke step runs green on GitHub at least once. Proof that the sysctl + FHS +
+    jailed run works on hosted runners.
 2. `scripts/bump.sh --dry-run` run locally at the current version prints "up to date" and
    exits 0.
 3. Script self-check: `scripts/bump.sh --dry-run --pretend-current 0.3.12` finds 0.4.0,
