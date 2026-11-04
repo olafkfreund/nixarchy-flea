@@ -22,6 +22,24 @@ nix run github:olafkfreund/nixarchy-flea -- --gui
 Flea runs, but nothing is registered: there is no portal picker, no "Show in folder" and
 no default file manager. For those, use the modules below.
 
+## CI and updates
+
+[![check](https://github.com/olafkfreund/nixarchy-flea/actions/workflows/check.yml/badge.svg)](https://github.com/olafkfreund/nixarchy-flea/actions/workflows/check.yml)
+
+CI proves build, `nix flake check`, the smoke step (libraries, version, a jailed run) and format. It does not prove the GUI, portal, `gvfs` or GPU.
+
+A daily bot (`bump.yml`) looks for a new upstream release and opens a PR. The PR body lists upstream changes to the files the packaging relies on. "Inspection incomplete" means GitHub's compare was truncated or had no patch for some files, so read those yourself. You review and merge. A weekly PR (`lock.yml`) refreshes `nixpkgs`. Nothing merges by itself. `nixarchy` follows `main`.
+
+If a bot PR shows no check, close and reopen it (as you), or push to it.
+
+Manual liveness check:
+
+```bash
+gh run list -R olafkfreund/nixarchy-flea -w bump.yml -L 3
+```
+
+Failures open (or update) an issue labelled `bump-failed` or `lock-failed`.
+
 ## Flake input
 
 ```nix
