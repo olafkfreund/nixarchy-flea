@@ -28,7 +28,8 @@ reviewers:
   `.sha256`: `efa466c4…50d7`, verified locally). Not a flake input.
 - The only flake input is `nixpkgs` (`github:NixOS/nixpkgs/nixos-unstable`), plus
   `home-manager` used by `checks` only (`inputs.nixpkgs.follows`). System: `x86_64-linux` only.
-- Two derivations, nothing compiled:
+- Two derivations. Flea itself is not compiled (buildFHSEnv's own small init and rootfs
+  builder do build once, cold):
   - `flea-bin`: an unpacked release laid out like upstream's `packaging/flea-bin/PKGBUILD`
     `package()`, with `$out` as `/usr`. Binaries untouched.
   - `flea`: a `buildFHSEnv` runtime (`flea-fhs`) plus a thin output with `bin/`,
@@ -38,7 +39,7 @@ reviewers:
   copies of trust-checked tools in the FHS `usr/bin`, and a shelf `chmod` in the FHS profile.
 - NixOS module: registration and system services. HM module: per-user preferences.
   Dependency options live in both, and HM defers to `osConfig` when the NixOS module is on.
-- No build-time tests (nothing compiles). Checks are `nix flake check` layout/eval checks
+- No build-time tests (Flea is not compiled). Checks are `nix flake check` layout/eval checks
   plus host runtime checks.
 - Defaults: optional deps off, HTML preview on. The shelf is owned by Flea. Hyprland binds
   go in `~/.config/hypr/flea-binds.lua`, loaded by a hand-added `pcall(require, "hypr.flea-binds")`.
@@ -109,7 +110,7 @@ Repo traps that apply throughout:
      tools="bat soffice libreoffice"
      for f in "$out"/usr/share/thumbnailers/*.thumbnailer; do
        [ -e "$f" ] || continue
-       tools="$tools $(sed -n 's/^\(Try\)\?Exec=\([^ ]*\).*//p' "$f" | xargs -r -n1 basename)"
+       tools="$tools $(sed -n 's/^\(Try\)\?Exec=\([^ ]*\).*/\2/p' "$f" | xargs -r -n1 basename)"
      done
      for t in $(printf '%s
 ' $tools | sort -u); do
@@ -131,9 +132,10 @@ Repo traps that apply throughout:
    → verify (I run it): `nix build .#flea`; the build log shows `flea-fhs: real file bat`
      and the thumbnailer copies (gdk-pixbuf, heif); `grep -h ^Exec= result/share/dbus-1/services/*`
      all start with the flea-fhs store path; `nix run .#flea -- --version` prints `0.4.0`;
-     and inside the env (`result/…/flea-fhs sh -c '…'`): `test -f /usr/bin/bat -a ! -L /usr/bin/bat`,
+     and inside the env, with `fhs=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.flea.fhs)`
+     and each check run as `$fhs/bin/flea-fhs sh -c '…'`: `test -f /usr/bin/bat -a ! -L /usr/bin/bat`,
      `command -v bwrap` → `/usr/bin/bwrap`, `head -2 /usr/bin/bwrap` is the shim,
-     `ldd /usr/bin/flea-gui | grep -c 'not found'` → 0, and
+     `! ldd /usr/bin/flea-gui | grep -q 'not found'` (exit 0 = nothing missing), and
      `bwrap --ro-bind /usr /usr --ro-bind /etc /etc --symlink usr/lib /lib --ro-bind-try /lib64 /lib64 --proc /proc --dev /dev --unshare-all -- /usr/bin/flea --version` → `0.4.0`.
      The last one proves a jailed prebuilt binary loads its libraries.
    Traps: `buildFHSEnv` takes `targetPkgs` as a function. Flea calls `/usr/bin/7z`, not
@@ -201,11 +203,12 @@ Repo traps that apply throughout:
      - `flea-bin-layout` (spec check 2): a runCommand asserting the step 1 paths
      - `flea-services` (spec check 3): every `Exec=` starts with the flea-fhs path
      - `nixos-module` (eval only; it does not build the toplevel closure):
-       `nixpkgs.lib.nixosSystem { system = "x86_64-linux"; modules = [ self.nixosModules.flea { programs.flea.enable = true; programs.flea.optionalDependencies.ffmpeg = true; boot.isContainer = true; system.stateVersion = "26.05"; } ]; }`.
+       `nixpkgs.lib.nixosSystem { system = "x86_64-linux"; modules = [ self.nixosModules.flea { programs.flea.enable = true; programs.flea.optionalDependencies = lib.genAttrs (builtins.attrNames self.packages.x86_64-linux.flea.optionalPackages) (_: true); boot.isContainer = true; system.stateVersion = "26.05"; } ]; }`
+       (every option on, as the spec asks; eval only, so the large optional closures are not built).
        A runCommand whose text is produced by `lib.assertMsg` checks that
        `config.xdg.portal.extraPortals` contains `config.programs.flea.package` and that
        `services.gvfs.enable` is true.
-     - `hm-module`: `home-manager.lib.homeManagerConfiguration { pkgs = nixpkgs.legacyPackages.x86_64-linux; modules = [ self.homeManagerModules.flea { home = { username = "t"; homeDirectory = "/home/t"; stateVersion = "26.05"; }; programs.flea = { enable = true; defaultFileManager.enable = true; filePicker.enable = true; hyprland.bindings.enable = true; }; } ]; }`.
+     - `hm-module`: `home-manager.lib.homeManagerConfiguration { pkgs = nixpkgs.legacyPackages.x86_64-linux; modules = [ self.homeManagerModules.flea { home = { username = "t"; homeDirectory = "/home/t"; stateVersion = "26.05"; }; programs.flea = { enable = true; defaultFileManager.enable = true; filePicker.enable = true; hyprland.bindings.enable = true; htmlPreview = false; optionalDependencies = <all true, as above>; extraPackages = [ pkgs.hello ]; omarchyPath = "/opt/omarchy"; }; } ]; }`.
        Read `config.xdg.configFile`/`xdg.dataFile` `.text` at eval time and assert:
        `flea-binds.lua` has both blocks, `hyprland-portals.conf` has no `default=`, the
        FileManager1 service `Exec=` uses flea-fhs, and the mimeApps entry is set. Eval only,
@@ -251,7 +254,7 @@ Repo traps that apply throughout:
 
 | Command | Expected |
 |---|---|
-| `nix build .#flea-bin .#flea -L` | both build; only the tarball is fetched; nothing compiles |
+| `nix build .#flea-bin .#flea -L` | both build; only the tarball is fetched; Flea is not compiled |
 | step 3's in-env checks | real-file copies, the shim on PATH, no missing libraries, the jailed binary runs |
 | `nix flake check -L` | `flea-bin-layout`, `flea-services`, `nixos-module`, `hm-module`, `hm-under-nixos` pass |
 | `nix run .#flea -- --version` | `0.4.0` |
