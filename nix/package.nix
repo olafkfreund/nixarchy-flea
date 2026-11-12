@@ -88,11 +88,11 @@ let
 
   flea-bin = stdenvNoCC.mkDerivation rec {
     pname = "flea-bin";
-    version = "0.4.0";
+    version = "0.4.2";
 
     src = fetchurl {
       url = "https://github.com/thisisgm/flea/releases/download/v${version}/flea-v${version}-linux-x86_64.tar.gz";
-      hash = "sha256-76RmxJFiKMrW43T58zshbvI29TUVdY/dxQLGly9cUNc=";
+      hash = "sha256-tEaBSI4XVan06xOVKDV+hkl0VM2FOuxDjXfeqzyOHAU=";
     };
 
     dontConfigure = true;
